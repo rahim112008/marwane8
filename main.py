@@ -1,5 +1,5 @@
 """
-🐄 Bovine Genomics Pipeline v8.0 — Lab-Grade
+🐄 Bovine Genomics Pipeline v8.1 — Lab-Grade
 ============================================================
 Sections :
   §1  Imports & Configuration
@@ -38,7 +38,7 @@ from sklearn.decomposition import NMF, PCA
 from sklearn.manifold import MDS as SklearnMDS
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
-st.set_page_config(page_title="🐄 Bovine Pipeline v8.0", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v8.1", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 DEFAULT_THRESHOLDS = {"geno": 0.05, "mind": 0.05, "maf": 0.05, "hwe": 1e-6, "het_sd": 3.0, "king_cutoff": 0.354, "ld_r2": 0.2}
 ARS_UCD12_LENGTHS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
@@ -776,7 +776,7 @@ def r_qqman(res_df, prefix):
 _STATE_KEYS = ["gt","ind_df","snp_df","gt_filt","ind_filt","snp_filt","gt_pre","ind_pre","snp_pre",
     "gt_pruned","snp_pruned","qc_stats","pca_s","pca_v","mds_c","king_K","fst","fst_M","fst_pops",
     "admix_Q","admix_K","cv_res","ld_df","roh_df","froh","ne_dict","reyn_D","reyn_pops",
-    "sel_df","scan_df","pheno_df","gwas_res","gwas_pheno","lambda","gebv_df","gblup_stats",
+    "sel_df","scan_df","pheno_df","gwas_res","gwas_pheno","lambda_gc","gebv_df","gblup_stats",
     "annotation_df","_plink","_vcf","_r_manh","_r_qq","mapping_df"]
 
 def init_state():
@@ -785,7 +785,7 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v8.0 — Lab-Grade")
+    st.title("🐄 Bovine Genomics Pipeline v8.1 — Lab-Grade")
     st.caption(f"R {'✅ disponible' if r_available() else '⚠️ non disponible (fallback Python)'} · 16 sections · 11 onglets · 60+ fonctions")
 
     # ---------- SIDEBAR ----------
@@ -943,7 +943,6 @@ def main():
     with tabs[5]:
         if st.button("▶ Scan sélection (fenêtres)",key="sel_scan_btn"):
             try:
-                use_pre=st.checkbox("Utiliser pré-outliers",value=True,key="sel_pre_cb") if False else True
                 if st.session_state.gt_pre is not None:
                     gt_use,ind_use,snp_use=st.session_state.gt_pre,st.session_state.ind_pre,st.session_state.snp_pre
                 else:
@@ -1014,8 +1013,8 @@ def main():
                                 res=run_gwas(gt_gwas,ps.values,st.session_state.king_K,covs,is_binary=is_bin)
                                 res=annotate_gwas(res,snp_gwas)
                                 st.session_state.gwas_res=res
-                                st.session_state.lambda=lambda_gc(res["P"].values) if len(res) else np.nan
-                            st.success(f"✅ {len(res)} SNPs · λGC={st.session_state.lambda:.3f}")
+                                st.session_state.lambda_gc=lambda_gc(res["P"].values) if len(res) else np.nan
+                            st.success(f"✅ {len(res)} SNPs · λGC={st.session_state.lambda_gc:.3f}")
                             st.plotly_chart(plot_manhattan(res),use_container_width=True)
                             if use_r and not res.empty:
                                 pngs,msg=r_qqman(res,"bovine_gwas")
