@@ -992,18 +992,9 @@ def main():
             df=pd.DataFrame({"FROH":st.session_state.froh,"Pop":st.session_state.ind_filt["FID"].values})
             st.plotly_chart(px.histogram(df,x="FROH",color="Pop",nbins=50,title="Distribution FROH"),use_container_width=True)
 
-    # ── Sélection ──
+        # ── Sélection (avec annotation intégrée) ──
     with tabs[5]:
-        if st.button("▶ Scan FST fenêtres",key="sel_scan_btn"):
-            try:
-                gt_use=st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
-                snp_use=st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
-                ind_use=st.session_state.ind_filt
-                scan=windowed_scan(gt_use,snp_use,ind_use["FID"].astype(str).values); st.session_state.scan_df=scan; st.success(f"✅ {len(scan)} fenêtres")
-            except Exception as e: st.error(f"❌ {e}")
-        if st.session_state.scan_df is not None and not st.session_state.scan_df.empty:
-            st.plotly_chart(px.scatter(st.session_state.scan_df,x="START",y="MEAN_SCORE",color="CHR",title="Scan sélection"),use_container_width=True)
-        if st.button("▶ FST pairwise + Reynolds + NJ",key="fst_btn"):
+        if st.button("▶ FST pairwise + Reynolds", key="fst_btn"):
             try:
                 gt_use=st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
                 snp_use=st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
@@ -1012,15 +1003,70 @@ def main():
                 M,pops=fst_pairwise(gt_use,labels); st.session_state.update({"fst_M":M,"fst_pops":pops})
                 D,rp=reynolds(gt_use,labels); st.session_state.update({"reyn_D":D,"reyn_pops":rp}); st.success("✅")
             except Exception as e: st.error(f"❌ {e}")
+
         if st.session_state.fst is not None:
             snp_fst = st.session_state.fst_snp_df if st.session_state.get("fst_snp_df") is not None else st.session_state.snp_filt
             n_fst = min(len(st.session_state.fst), len(snp_fst))
             df_fst = pd.DataFrame({"SNP":snp_fst["SNP"].values[:n_fst],"CHR":snp_fst["CHR"].values[:n_fst],
                                    "BP":snp_fst["BP"].values[:n_fst],"FST":st.session_state.fst[:n_fst]})
             st.plotly_chart(plot_manhattan(df_fst, ycol="FST", title="FST par SNP"), use_container_width=True)
-        if st.session_state.reyn_D is not None: st.code(nj_newick(st.session_state.reyn_D,st.session_state.reyn_pops))
 
-        st.divider(); st.subheader("🧬 Signatures de sélection (3 méthodes)")
+        # ── ARBRE PHYLOGÉNÉTIQUE AVANCÉ ──
+        st.divider()
+        st.subheader("🌳 Arbre phylogénétique (NJ + Bootstrap + Midpoint)")
+
+        if st.session_state.reyn_D is not None:
+            c1, c2 = st.columns(2)
+            n_boot = c1.slider("Bootstrap réplicats", 10, 500, 100, 10, key="nj_boot")
+            root_opt = c2.selectbox("Enracinement", ["Non-enraciné", "Midpoint rooted"], key="nj_root")
+
+            if st.button("🌲 Construire l'arbre avec bootstrap", type="primary", key="nj_tree_btn"):
+                try:
+                    gt_use=st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
+                    snp_use=st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
+                    labels_arr=st.session_state.ind_filt["FID"].astype(str).values
+                    with st.spinner(f"NJ + {n_boot} bootstraps..."):
+                        result = nj_tree_with_bootstrap(gt_use, snp_use, labels_arr, n_boot=int(n_boot))
+                        st.session_state.nj_result = result
+                        mp = midpoint_root_info(result["D"], result["pops"])
+                        st.session_state.nj_midpoint = mp
+                    st.success(f"✅ Arbre construit ({n_boot} réplicats)")
+                except Exception as e: st.error(f"❌ {e}")
+
+            if st.session_state.get("nj_result") is not None:
+                res = st.session_state.nj_result
+                mp = st.session_state.get("nj_midpoint")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Races", len(res["pops"]))
+                c2.metric("Nœuds", len(res["support"]))
+                c3.metric("Support ≥ 70%", f"{(res['support']>=70).sum()}/{len(res['support'])}")
+                c4.metric("Distance max", f"{mp['max_dist']:.4f}" if mp else "N/A")
+                if mp:
+                    st.info(f"**Midpoint** entre **{mp['leaf_i']}** et **{mp['leaf_j']}** (distance {mp['max_dist']:.4f}, milieu à {mp['midpoint']:.4f})")
+                fig_tree = plot_tree_plotly(
+                    res["Z"], res["pops"], res["support"],
+                    title=f"Arbre NJ — {len(res['pops'])} races (bootstrap, n={n_boot})",
+                    midpoint_info=mp if root_opt == "Midpoint rooted" else None
+                )
+                st.plotly_chart(fig_tree, use_container_width=True)
+                st.caption("🟢 Support ≥ 70% · 🟠 50–70% · 🔴 < 50% · Ligne violette = midpoint")
+                with st.expander("📄 Newick avec support (iTOL/FigTree compatible)"):
+                    st.code(res["newick"], language="text")
+                st.download_button("⬇ Télécharger Newick (.nwk)",
+                                   res["newick"].encode(),
+                                   "bovine_tree_bootstrap.nwk",
+                                   "text/plain")
+                with st.expander("📊 Détail des supports bootstrap"):
+                    supp_df = pd.DataFrame({
+                        "Nœud": [f"N{i+1}" for i in range(len(res["support"]))],
+                        "Support (%)": res["support"].astype(int),
+                        "Distance": res["Z"][:,2].round(4)
+                    })
+                    st.dataframe(supp_df, use_container_width=True)
+
+        # ── SIGNATURES DE SÉLECTION ──
+        st.divider()
+        st.subheader("🧬 Signatures de sélection (3 méthodes)")
         if st.session_state.gt_filt is not None:
             gt_use = st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
             snp_use = st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
@@ -1069,8 +1115,9 @@ def main():
                     st.plotly_chart(plot_manhattan(css.rename(columns={"CSS":"P"}).assign(P=lambda d: np.exp(-d["CSS"])),ycol="P",title="Score composite"),use_container_width=True)
                     st.dataframe(css.head(20)[['SNP','CHR','BP','FST','HOM','MAF','Z_FST','Z_HOM','CSS']],use_container_width=True)
 
-        # GWAS pairwise
-        st.divider(); st.subheader("🧬 GWAS entre races (case-control)")
+        # ── GWAS PAIRWISE ENTRE RACES ──
+        st.divider()
+        st.subheader("🧬 GWAS entre races (case-control)")
         if st.session_state.gt_filt is not None:
             gt_use = st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
             snp_use = st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
@@ -1095,6 +1142,131 @@ def main():
                         st.plotly_chart(px.histogram(res,x="delta_freq",nbins=60,title=f"Δ fréquence {ra} vs {rb}"),use_container_width=True)
                         st.download_button(f"⬇ {ra} vs {rb} (CSV)",res.to_csv(index=False).encode(),f"pair_{ra}_{rb}.csv","text/csv")
                 except Exception as e: st.error(f"❌ {e}")
+
+        # ── 🆕 ANNOTATION GFF3 (dans Sélection) ──
+        st.divider()
+        st.subheader("🧬 Annotation génomique des régions candidates")
+        st.caption("Associez les SNPs issus des analyses de sélection aux gènes du génome bovin (ARS-UCD1.2).")
+
+        gff_f = st.file_uploader(
+            "Fichier d'annotation GFF3/GTF bovin (.gff3, .gtf, .gz)",
+            type=["gff","gff3","gtf","gz"], key="sel_gff_file"
+        )
+
+        # Sources disponibles
+        sources = []
+        if st.session_state.get("win_fst") is not None and len(st.session_state.win_fst) > 0:
+            sources.append("FST fenêtres (outliers)")
+        if st.session_state.get("taj_df") is not None and len(st.session_state.taj_df) > 0:
+            sources.append("Tajima's D (fenêtres extrêmes)")
+        if st.session_state.get("css_df") is not None and len(st.session_state.css_df) > 0:
+            sources.append("Score composite (top SNPs)")
+        if st.session_state.get("pair_res") is not None and len(st.session_state.pair_res) > 0:
+            sources.append("GWAS pairwise (top différenciés)")
+        sources.append("Recherche manuelle par position")
+
+        if gff_f is not None:
+            try:
+                with st.spinner("Chargement du GFF3..."):
+                    gff_df = parse_gff3(gff_f.read())
+                st.success(f"✅ {len(gff_df)} gènes chargés ({gff_df['CHR'].nunique()} chromosomes)")
+                st.session_state.sel_gff = gff_df
+
+                c1, c2 = st.columns(2)
+                source_sel = c1.selectbox("Source des SNPs à annoter", sources, key="sel_ann_src")
+                window_kb = c2.slider("Fenêtre autour du SNP (kb)", 1, 500, 50, key="sel_ann_win")
+
+                snps_to_annotate = None
+
+                if source_sel == "FST fenêtres (outliers)":
+                    win = st.session_state.win_fst
+                    outliers = win[win.get("OUTLIER", False) == True] if "OUTLIER" in win.columns else win.head(20)
+                    if len(outliers) == 0: outliers = win.head(20)
+                    st.info(f"🎯 {len(outliers)} fenêtres outliers à annoter")
+                    snps_to_annotate = outliers.head(50)[["CHR","START","TOP_SNP"]].copy()
+                    snps_to_annotate = snps_to_annotate.rename(columns={"START":"BP","TOP_SNP":"SNP"})
+
+                elif source_sel == "Tajima's D (fenêtres extrêmes)":
+                    taj = st.session_state.taj_df
+                    n_extreme = st.slider("N fenêtres extrêmes (les plus négatives)", 5, 100, 20, key="sel_ann_taj_n")
+                    extremes = taj.sort_values("TAJIMA_D").head(n_extreme)
+                    st.info(f"🎯 {len(extremes)} fenêtres avec D le plus négatif")
+                    snps_to_annotate = extremes[["CHR","MID"]].copy().rename(columns={"MID":"BP"})
+                    snps_to_annotate["SNP"] = ["Tajima_" + str(i+1) for i in range(len(snps_to_annotate))]
+
+                elif source_sel == "Score composite (top SNPs)":
+                    css = st.session_state.css_df
+                    n_top = st.slider("N top SNPs", 10, 200, 30, key="sel_ann_css_n")
+                    top_css = css.head(n_top)[["SNP","CHR","BP"]].copy()
+                    st.info(f"🎯 {len(top_css)} top SNPs du score composite")
+                    snps_to_annotate = top_css
+
+                elif source_sel == "GWAS pairwise (top différenciés)":
+                    pair = st.session_state.pair_res
+                    n_top = st.slider("N top SNPs différenciés", 10, 200, 30, key="sel_ann_pair_n")
+                    top_pair = pair.head(n_top)[["SNP","CHR","BP"]].copy()
+                    st.info(f"🎯 {len(top_pair)} top SNPs de la comparaison")
+                    snps_to_annotate = top_pair
+
+                else:  # Recherche manuelle
+                    c1, c2 = st.columns(2)
+                    chrom_manual = c1.text_input("Chromosome (ex: 14)", "14", key="sel_man_chr")
+                    pos_manual = c2.number_input("Position (bp)", 0, 200_000_000, 25_000_000, 100000, key="sel_man_pos")
+                    snps_to_annotate = pd.DataFrame({"SNP": [f"manual_{chrom_manual}_{pos_manual}"],
+                                                      "CHR": [str(chrom_manual)],
+                                                      "BP": [int(pos_manual)]})
+
+                if snps_to_annotate is not None and len(snps_to_annotate) > 0:
+                    if st.button("🔍 Lancer l'annotation", type="primary", key="sel_ann_btn"):
+                        with st.spinner("Recherche des gènes..."):
+                            try:
+                                ann = annotate_genes(snps_to_annotate, gff_df, window_kb=window_kb)
+                                st.session_state.sel_annotation = ann
+                                if ann.empty:
+                                    st.warning(f"⚠️ Aucun gène trouvé dans ±{window_kb} kb. Essayez une fenêtre plus large.")
+                                else:
+                                    n_snps = ann["SNP"].nunique()
+                                    n_genes = ann["GENE"].nunique()
+                                    st.success(f"✅ {len(ann)} associations · {n_snps} SNPs · {n_genes} gènes uniques")
+                            except Exception as e: st.error(f"❌ {e}")
+
+                # Affichage des résultats
+                if st.session_state.get("sel_annotation") is not None and len(st.session_state.sel_annotation) > 0:
+                    ann = st.session_state.sel_annotation
+                    st.markdown("### 📋 Gènes identifiés")
+                    st.dataframe(ann, use_container_width=True)
+
+                    # Stats
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("SNPs annotés", ann["SNP"].nunique())
+                    c2.metric("Gènes", ann["GENE"].nunique())
+                    c3.metric("Fenêtre ±", f"{window_kb} kb")
+
+                    # Export
+                    st.download_button("⬇ Export annotation (CSV)",
+                                       ann.to_csv(index=False).encode(),
+                                       "selection_annotation.csv", "text/csv")
+
+                    # Gene track pour un SNP sélectionné
+                    st.markdown("### 🎨 Visualisation de la région")
+                    snp_choices = ann["SNP"].unique().tolist()
+                    sel_snp = st.selectbox("Choisir un SNP", snp_choices, key="sel_ann_track_snp")
+                    row = ann[ann["SNP"] == sel_snp].iloc[0].to_dict()
+                    snp_info = {"SNP": row["SNP"], "CHR": row["CHR"], "BP": row["SNP_POS"]}
+                    fig_track = plot_gene_track(snp_info, gff_df, wk=window_kb)
+                    if fig_track:
+                        st.plotly_chart(fig_track, use_container_width=True)
+
+                    # Top gènes par fréquence
+                    st.markdown("### 🏆 Gènes les plus fréquemment touchés")
+                    gene_counts = ann["GENE"].value_counts().reset_index()
+                    gene_counts.columns = ["GENE", "N_SNPs"]
+                    st.dataframe(gene_counts.head(20), use_container_width=True)
+
+            except Exception as e:
+                st.error(f"❌ Erreur parsing GFF3 : {e}")
+        else:
+            st.info("💡 **Télécharger le GFF3 bovin :** [Ensembl ARS-UCD1.2](https://ftp.ensembl.org/pub/current_gff3/bos_taurus/)")
 
     # ── GWAS ──
     with tabs[6]:
