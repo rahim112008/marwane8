@@ -1,24 +1,5 @@
 """
-🐄 Bovine Genomics Pipeline v8.1 — Lab-Grade
-============================================================
-Sections :
-  §1  Imports & Configuration
-  §2  Utilitaires
-  §3  I/O — Parsing (Axiom, PED, MAP, VCF, Phénotypes, GFF3)
-  §4  Métriques QC
-  §5  Filtres QC (cascade + outliers + pré/post)
-  §6  Génétique des populations (FST, PCA, KING, MDS, Admixture)
-  §7  Démographie (LD decay, ROH, Ne)
-  §8  Sélection (scan par fenêtres, Reynolds)
-  §9  GWAS (LMM, logistique, R qqman)
-  §10 Post-GWAS (Fine-mapping)
-  §11 Génomique de sélection (GBLUP, REML, CV)
-  §12 Annotation (GFF3)
-  §13 Export (PLINK, VCF, HTML)
-  §14 Visualisation
-  §15 Pont R (subprocess)
-  §16 Interface Streamlit
-============================================================
+🐄 Bovine Genomics Pipeline v8.2 — Lab-Grade
 """
 # §1 ───────────────────────────────────────────────────────
 import gzip, io, json, os, warnings, zipfile, subprocess, tempfile, shutil, traceback
@@ -38,7 +19,7 @@ from sklearn.decomposition import NMF, PCA
 from sklearn.manifold import MDS as SklearnMDS
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
-st.set_page_config(page_title="🐄 Bovine Pipeline v8.1", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v8.2", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 DEFAULT_THRESHOLDS = {"geno": 0.05, "mind": 0.05, "maf": 0.05, "hwe": 1e-6, "het_sd": 3.0, "king_cutoff": 0.354, "ld_r2": 0.2}
 ARS_UCD12_LENGTHS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
@@ -738,15 +719,10 @@ png(paste0(out,"_manh.png"),2400,1400,res=200)
 manhattan(df,chr="CHR",bp="BP",snp="SNP",p="P",suggestiveline=-log10(1e-5),genomewideline=-log10(5e-8),col=c("grey30","grey60"),chrlabs=as.character(1:29))
 dev.off()
 png(paste0(out,"_qq.png"),1400,1400,res=200); qq(df$P); dev.off()
-cat("OK")''',
-"iHS": '''suppressMessages({library(rehh);library(data.table)})
-args<-commandArgs(TRUE)
-cat("iHS placeholder - requires phased haplotypes")
-'''
+cat("OK")'''
 }
 
-def r_available():
-    return shutil.which("Rscript") is not None
+def r_available(): return shutil.which("Rscript") is not None
 
 def run_r(script_key, args_list, timeout=300):
     if not r_available(): return "R non installé", False
@@ -766,7 +742,7 @@ def r_qqman(res_df, prefix):
         tmp_csv=tempfile.mktemp(suffix=".csv"); res_df[["SNP","CHR","BP","P"]].to_csv(tmp_csv,index=False)
         prefix_clean=prefix.replace(" ","_")
         out, ok = run_r("qqman",[tmp_csv,prefix_clean])
-        os.unlink(tmp_csv) if os.path.exists(tmp_csv) else None
+        if os.path.exists(tmp_csv): os.unlink(tmp_csv)
         if ok and os.path.exists(prefix_clean+"_manh.png"):
             return (prefix_clean+"_manh.png", prefix_clean+"_qq.png"), out
         return None, out
@@ -777,7 +753,7 @@ _STATE_KEYS = ["gt","ind_df","snp_df","gt_filt","ind_filt","snp_filt","gt_pre","
     "gt_pruned","snp_pruned","qc_stats","pca_s","pca_v","mds_c","king_K","fst","fst_M","fst_pops",
     "admix_Q","admix_K","cv_res","ld_df","roh_df","froh","ne_dict","reyn_D","reyn_pops",
     "sel_df","scan_df","pheno_df","gwas_res","gwas_pheno","lambda_gc","gebv_df","gblup_stats",
-    "annotation_df","_plink","_vcf","_r_manh","_r_qq","mapping_df"]
+    "annotation_df","_plink","_vcf","_r_manh","_r_qq","mapping_df","fst_snp_df"]
 
 def init_state():
     for k in _STATE_KEYS:
@@ -785,10 +761,9 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v8.1 — Lab-Grade")
-    st.caption(f"R {'✅ disponible' if r_available() else '⚠️ non disponible (fallback Python)'} · 16 sections · 11 onglets · 60+ fonctions")
+    st.title("🐄 Bovine Genomics Pipeline v8.2 — Lab-Grade")
+    st.caption(f"R {'✅ disponible' if r_available() else '⚠️ non disponible (fallback Python)'}")
 
-    # ---------- SIDEBAR ----------
     with st.sidebar:
         st.header("📁 Données")
         mode = st.radio("Source", ["Demo", "PED/MAP", "VCF", "Axiom→PED"], key="src")
@@ -924,8 +899,7 @@ def main():
                     ne={}
                     for f in st.session_state.ind_filt["FID"].unique():
                         m=(st.session_state.ind_filt["FID"]==f).values
-                        if m.sum()>=5:
-                            ne[str(f)]=ne_historical(gt_use[m],snp_use)
+                        if m.sum()>=5: ne[str(f)]=ne_historical(gt_use[m],snp_use)
                     st.session_state.ne_dict=ne; st.success(f"✅ {len(roh)} ROH")
                 except Exception as e: st.error(f"❌ {e}")
             if st.session_state.froh is not None:
@@ -933,7 +907,7 @@ def main():
                 st.plotly_chart(px.histogram(df,x="FROH",color="Pop",nbins=50,title="Distribution FROH"),use_container_width=True)
             if st.session_state.ne_dict:
                 fig=go.Figure()
-                for i,(r,df) in enumerate(st.session_state.ne_dict.items()):
+                for r,df in st.session_state.ne_dict.items():
                     if df is None or df.empty: continue
                     fig.add_trace(go.Scatter(x=df["GenAgo"],y=df["Ne"],mode="lines+markers",name=r))
                 fig.update_layout(title="Ne historique",xaxis_title="Générations",height=500)
@@ -953,17 +927,30 @@ def main():
             except Exception as e: st.error(f"❌ {e}")
         if st.session_state.scan_df is not None and not st.session_state.scan_df.empty:
             st.plotly_chart(px.scatter(st.session_state.scan_df,x="START",y="MEAN_SCORE",color="CHR",title="Scan sélection"),use_container_width=True)
+
         if st.button("▶ FST pairwise + Reynolds + NJ",key="fst_btn"):
             try:
                 gt_use=st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
+                snp_use=st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
                 labels=st.session_state.ind_filt["FID"].astype(str).values
                 st.session_state.fst=fst_snp(gt_use,labels)
+                st.session_state.fst_snp_df=snp_use.copy()  # ← AJOUT : stocker le bon snp_df
                 M,pops=fst_pairwise(gt_use,labels); st.session_state.update({"fst_M":M,"fst_pops":pops})
                 D,rp=reynolds(gt_use,labels); st.session_state.update({"reyn_D":D,"reyn_pops":rp})
                 st.success("✅ Calculé")
             except Exception as e: st.error(f"❌ {e}")
+
         if st.session_state.fst is not None:
-            st.plotly_chart(plot_manhattan(pd.DataFrame({"SNP":st.session_state.snp_filt["SNP"].values,"CHR":st.session_state.snp_filt["CHR"].values,"BP":st.session_state.snp_filt["BP"].values,"P":np.full(len(st.session_state.fst),np.nan)}).assign(FST=st.session_state.fst),ycol="FST",title="FST par SNP"),use_container_width=True)
+            snp_for_fst = st.session_state.fst_snp_df if st.session_state.get("fst_snp_df") is not None else st.session_state.snp_filt
+            n_fst = min(len(st.session_state.fst), len(snp_for_fst))
+            df_fst = pd.DataFrame({
+                "SNP": snp_for_fst["SNP"].values[:n_fst],
+                "CHR": snp_for_fst["CHR"].values[:n_fst],
+                "BP":  snp_for_fst["BP"].values[:n_fst],
+                "FST": st.session_state.fst[:n_fst]
+            })
+            st.plotly_chart(plot_manhattan(df_fst, ycol="FST", title="FST par SNP"), use_container_width=True)
+
         if st.session_state.reyn_D is not None:
             st.code(nj_newick(st.session_state.reyn_D,st.session_state.reyn_pops))
 
