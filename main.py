@@ -1,4 +1,4 @@
-"""🐄 Bovine Genomics Pipeline v8.6 — Bloc C conforme + Annotation cM"""
+"""🐄 Bovine Genomics Pipeline v9.0 — Ultimate Edition (Race + Groupe + Comparaison)"""
 import gzip, io, os, warnings, zipfile, subprocess, tempfile, shutil
 from collections import Counter
 from io import BytesIO
@@ -14,11 +14,50 @@ from scipy.stats import t as t_dist
 from sklearn.decomposition import NMF, PCA
 from sklearn.manifold import MDS as SklearnMDS
 warnings.filterwarnings("ignore", category=RuntimeWarning)
-st.set_page_config(page_title="🐄 Bovine Pipeline v8.6", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+
+st.set_page_config(page_title="🐄 Bovine Pipeline v9.0", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 ARS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
 AUTO = [str(i) for i in range(1,30)]
 
+# ============================================================
+# GROUPES PHÉNOTYPIQUES (RACE OU GROUPE)
+# ============================================================
+GROUPES_DEFAULT = {
+    "Type de production": {
+        "VIANDE": ["LJR", "SHO", "YBS"], "LAIT": ["NAR", "NBD", "PRS"],
+        "MIXTE_AFRICAIN": ["AND", "EBG", "ELN"], "ZEBU": ["PTP", "PRS"],
+    },
+    "Teneur en gras du lait": {
+        "LAIT_GRAS": ["NAR", "SHO", "YBS"], "LAIT_MAIGRE": ["PTP", "PRS", "LJR"],
+    },
+    "Cornes": {
+        "CORNU": ["AND", "ELN", "PTP", "PRS"], "POLLED": ["SHO", "YBS"],
+    },
+    "Origine géographique": {
+        "EUROPEEN": ["LJR", "SHO", "YBS", "NAR"], "AFRICAIN": ["AND", "EBG", "ELN"], "ZEBU": ["PTP", "PRS"],
+    }
+}
+
+def make_group_map(group_dict):
+    mapping = {}
+    for grp, races in group_dict.items():
+        for r in races: mapping[r.upper()] = grp
+    return mapping
+
+def apply_group_mapping(ind_df, group_map, default="AUTRE"):
+    df = ind_df.copy()
+    df["FID"] = df["FID"].astype(str).str.upper()
+    df["FID_GROUPE"] = df["FID"].map(group_map).fillna(default)
+    return df
+
+def get_pairs_groups(groups):
+    g = sorted(pd.unique(groups).astype(str))
+    return g, [(g[i], g[j]) for i in range(len(g)) for j in range(i + 1, len(g))]
+
+# ============================================================
+# FONCTIONS CACHE & UTILS
+# ============================================================
 def _ha(x):
     if not isinstance(x,np.ndarray) or x.size==0: return "empty"
     if x.dtype.kind in ("U","S","O"): return f"a|{x.shape}|{'|'.join(map(str,x.ravel()[:2000]))}"
@@ -161,16 +200,15 @@ def match_pheno(ind_df, pheno_df, mapping_df=None):
     if mapping_df is not None:
         p,m = pheno_df.copy(), mapping_df.copy()
         id_c = next((c for c in ["Animal","IID","id","ID"] if c in p.columns), None)
-        if id_c is None: raise ValueError(f"Colonne ID absente. Dispo: {list(p.columns)}")
+        if id_c is None: raise ValueError(f"Colonne ID absente.")
         p[id_c]=p[id_c].astype(str)
         map_a = next((c for c in m.columns if c!="IID"), None)
-        if map_a is None or "IID" not in m.columns: raise ValueError("CSV mapping: 'IID' + nom animal requis")
         m[map_a]=m[map_a].astype(str); m["IID"]=m["IID"].astype(str)
         pm = p.merge(m, left_on=id_c, right_on=map_a, how="left")
         ind = ind_df.copy(); ind["_k"]=ind["IID"].astype(str); pm["_k"]=pm["IID"].astype(str)
         return ind[["_k","FID","IID"]].merge(pm.drop(columns=["IID"],errors="ignore"),on="_k",how="left").drop(columns="_k"), id_c
     id_c = next((c for c in ["IID","id","ID","sample","Animal","animal"] if c in pheno_df.columns), None)
-    if id_c is None: raise ValueError(f"Aucune colonne ID. Dispo: {list(pheno_df.columns)}")
+    if id_c is None: raise ValueError(f"Aucune colonne ID.")
     p = pheno_df.copy(); p[id_c]=p[id_c].astype(str)
     ind = ind_df.copy(); ind["_k"]=ind["IID"].astype(str); p["_k"]=p[id_c]
     return ind[["_k","FID","IID"]].merge(p.drop(columns=[id_c]),on="_k",how="left").drop(columns="_k"), id_c
@@ -397,45 +435,27 @@ def ne_historical(gt, snp_df, max_snp=2000):
     if len(df)>3: df["Ne"]=df["Ne"].rolling(3,center=True,min_periods=1).mean()
     return df
 
-# ═══════════════════════════════════════════════════════════
-# BLOC C — SIGNATURES DE SÉLECTION (conforme spécification)
-# ═══════════════════════════════════════════════════════════
-
 @cache_data
 def windowed_fst(gt, snp_df, labels, w=50, step=25):
-    """8.3.1 — FST par fenêtres glissantes."""
     fst=fst_snp(gt,labels); snp=snp_df.copy().reset_index(drop=True)
-    n=min(len(snp),len(fst))
-    snp=snp.iloc[:n].reset_index(drop=True); fst=fst[:n]; snp["FST"]=fst; res=[]
+    n=min(len(snp),len(fst)); snp=snp.iloc[:n].reset_index(drop=True); fst=fst[:n]; snp["FST"]=fst; res=[]
     for c in snp["CHR"].unique():
         sub=snp[snp["CHR"]==c].sort_values("BP").reset_index(drop=True)
         if len(sub)<w: continue
         for i in range(0,len(sub)-w+1,step):
             win=sub.iloc[i:i+w]
             if win["FST"].notna().sum()<5: continue
-            res.append({
-                "CHR": str(c),
-                "START": int(win["BP"].min()),
-                "END": int(win["BP"].max()),
-                "MID": int((win["BP"].min()+win["BP"].max())/2),
-                "N_SNP": len(win),
-                "MEAN_FST": float(win["FST"].mean()),
-                "MAX_FST": float(win["FST"].max()),
-                "TOP_SNP": win.iloc[win["FST"].argmax()]["SNP"]
-            })
+            res.append({"CHR":str(c),"START":int(win["BP"].min()),"END":int(win["BP"].max()),"MID":int((win["BP"].min()+win["BP"].max())/2),"N_SNP":len(win),"MEAN_FST":float(win["FST"].mean()),"MAX_FST":float(win["FST"].max()),"TOP_SNP":win.iloc[win["FST"].argmax()]["SNP"]})
     return pd.DataFrame(res)
 
 @cache_data
 def detect_outliers(win_df, z_thr=3.0):
-    """8.3.1 — Détection outliers par score z."""
     df=win_df.copy(); mu,sd=df["MEAN_FST"].mean(),df["MEAN_FST"].std()
-    df["Z_FST"]=(df["MEAN_FST"]-mu)/sd if sd>1e-9 else 0.0
-    df["OUTLIER"]=df["Z_FST"]>=z_thr
+    df["Z_FST"]=(df["MEAN_FST"]-mu)/sd if sd>1e-9 else 0.0; df["OUTLIER"]=df["Z_FST"]>=z_thr
     return df.sort_values("MEAN_FST",ascending=False).reset_index(drop=True)
 
 @cache_data
 def tajimas_window(genos):
-    """8.3.2 — Tajima's D pour une fenêtre."""
     ni,ns=genos.shape
     if ns<3 or ni<4: return np.nan,0
     S=0; piv=[]
@@ -443,22 +463,17 @@ def tajimas_window(genos):
         col=genos[:,j]; col=col[~np.isnan(col)]
         if len(col)<2: continue
         p=col.mean()/2.0
-        if 0<p<1:
-            S+=1
-            piv.append(2*p*(1-p)*(len(col)/(len(col)-1)))
+        if 0<p<1: S+=1; piv.append(2*p*(1-p)*(len(col)/(len(col)-1)))
     if S==0 or not piv: return np.nan,int(S)
-    pi=np.mean(piv); n=ni
-    a1=np.sum(1.0/np.arange(1,n)); a2=np.sum(1.0/(np.arange(1,n)**2))
+    pi=np.mean(piv); n=ni; a1=np.sum(1.0/np.arange(1,n)); a2=np.sum(1.0/(np.arange(1,n)**2))
     b1=(n+1)/(3*(n-1)); b2=2*(n**2+n+3)/(9*n*(n-1))
-    c1=b1-1/a1; c2=b2-(n+2)/(a1*n)+a2/(a1**2)
-    e1=c1/a1; e2=c2/(a1**2+a2)
+    c1=b1-1/a1; c2=b2-(n+2)/(a1*n)+a2/(a1**2); e1=c1/a1; e2=c2/(a1**2+a2)
     den=np.sqrt(e1*S+e2*S*(S-1))
     if den<=1e-12: return np.nan,int(S)
     return float((pi-S/a1)/den),int(S)
 
 @cache_data
 def tajimas_scan(gt, snp_df, w=25, step=10):
-    """8.3.2 — Scan Tajima's D sur tout le génome."""
     snp=snp_df.copy().reset_index(drop=True); n=min(gt.shape[1],len(snp))
     snp=snp.iloc[:n].reset_index(drop=True); gt=gt[:,:n]; res=[]
     for c in snp["CHR"].unique():
@@ -467,30 +482,16 @@ def tajimas_scan(gt, snp_df, w=25, step=10):
         idx=idx[np.argsort(snp["BP"].values[idx])]
         for i in range(0,len(idx)-w+1,step):
             wi=idx[i:i+w]; D,S=tajimas_window(gt[:,wi])
-            if not np.isnan(D):
-                res.append({
-                    "CHR":str(c),
-                    "START":int(snp.iloc[wi]["BP"].min()),
-                    "END":int(snp.iloc[wi]["BP"].max()),
-                    "MID":int((snp.iloc[wi]["BP"].min()+snp.iloc[wi]["BP"].max())/2),
-                    "N_SNP":len(wi),
-                    "S":S,
-                    "TAJIMA_D":D
-                })
+            if not np.isnan(D): res.append({"CHR":str(c),"START":int(snp.iloc[wi]["BP"].min()),"END":int(snp.iloc[wi]["BP"].max()),"MID":int((snp.iloc[wi]["BP"].min()+snp.iloc[wi]["BP"].max())/2),"N_SNP":len(wi),"S":S,"TAJIMA_D":D})
     return pd.DataFrame(res)
 
 @cache_data
 def composite_score(gt, snp_df, labels):
-    """8.3.3 — Score composite CSS = |Z_FST × Z_HOM|."""
-    fst=fst_snp(gt,labels); hom=np.nanmean((gt==0)|(gt==2),axis=0)
-    maf_v=np.nanmean(gt,axis=0)/2.0; maf_v=np.minimum(maf_v,1-maf_v)
+    fst=fst_snp(gt,labels); hom=np.nanmean((gt==0)|(gt==2),axis=0); maf_v=np.nanmean(gt,axis=0)/2.0; maf_v=np.minimum(maf_v,1-maf_v)
     df=snp_df.copy().reset_index(drop=True); n=min(len(df),len(fst),len(hom),len(maf_v))
-    df=df.iloc[:n].reset_index(drop=True)
-    df["FST"]=fst[:n]; df["HOM"]=hom[:n]; df["MAF"]=maf_v[:n]
-    def norm(x):
-        mu,sd=np.nanmean(x),np.nanstd(x); return (x-mu)/sd if sd>1e-9 else np.zeros_like(x)
-    df["Z_FST"]=norm(df["FST"].values); df["Z_HOM"]=norm(df["HOM"].values)
-    df["CSS"]=np.abs(df["Z_FST"]*df["Z_HOM"])
+    df=df.iloc[:n].reset_index(drop=True); df["FST"]=fst[:n]; df["HOM"]=hom[:n]; df["MAF"]=maf_v[:n]
+    def norm(x): mu,sd=np.nanmean(x),np.nanstd(x); return (x-mu)/sd if sd>1e-9 else np.zeros_like(x)
+    df["Z_FST"]=norm(df["FST"].values); df["Z_HOM"]=norm(df["HOM"].values); df["CSS"]=np.abs(df["Z_FST"]*df["Z_HOM"])
     return df.sort_values("CSS",ascending=False).reset_index(drop=True)
 
 @cache_data
@@ -499,8 +500,7 @@ def reynolds(gt, labels):
     D=np.zeros((K,K))
     for i in range(K):
         for j in range(i+1,K):
-            pi,pj=ph[pops[i]],ph[pops[j]]
-            num=np.nansum((pi-pj)**2); dn=np.nansum(pi*(1-pj)+pj*(1-pi))
+            pi,pj=ph[pops[i]],ph[pops[j]]; num=np.nansum((pi-pj)**2); dn=np.nansum(pi*(1-pj)+pj*(1-pi))
             if dn>0: D[i,j]=D[j,i]=num/dn
     return D,pops
 
@@ -513,22 +513,19 @@ def nj_bootstrap(gt, snp_df, labels, n_boot=100, seed=42):
         ph={p:np.nanmean(g[labels==p],0)/2.0 for p in pops}; D=np.zeros((K,K))
         for i in range(K):
             for j in range(i+1,K):
-                pi,pj=ph[pops[i]],ph[pops[j]]
-                num=np.nansum((pi-pj)**2); dn=np.nansum(pi*(1-pj)+pj*(1-pi))
+                pi,pj=ph[pops[i]],ph[pops[j]]; num=np.nansum((pi-pj)**2); dn=np.nansum(pi*(1-pj)+pj*(1-pi))
                 if dn>0: D[i,j]=D[j,i]=num/dn
         return D
     Do=cR(gt); Zo=linkage(squareform(Do,checks=False),method="average"); nl=K
     def gc(Z):
         cl={}
         for k,row in enumerate(Z):
-            i,j=int(row[0]),int(row[1])
-            l=frozenset([i]) if i<nl else cl[i]; r=frozenset([j]) if j<nl else cl[j]
+            i,j=int(row[0]),int(row[1]); l=frozenset([i]) if i<nl else cl[i]; r=frozenset([j]) if j<nl else cl[j]
             cl[nl+k]=frozenset(l|r)
         return cl
     co=gc(Zo); sc=np.zeros(len(Zo)); rng=np.random.default_rng(seed)
     for b in range(n_boot):
-        idx=rng.choice(n_snp,n_snp,replace=True); Db=cR(gt[:,idx]); Zb=linkage(squareform(Db,checks=False),method="average")
-        cb=set(gc(Zb).values())
+        idx=rng.choice(n_snp,n_snp,replace=True); Db=cR(gt[:,idx]); Zb=linkage(squareform(Db,checks=False),method="average"); cb=set(gc(Zb).values())
         for k,cl in co.items():
             zi=k-nl
             if 0<=zi<len(Zo) and cl in cb: sc[zi]+=1
@@ -548,29 +545,6 @@ def midpoint_info(D, labels):
         for j in range(i+1,n):
             if D[i,j]>md: md=D[i,j]; im,jm=i,j
     return {"leaf_i":labels[im],"leaf_j":labels[jm],"max_dist":float(md),"midpoint":float(md/2)}
-
-def plot_tree(Z, labels, support=None, title="", mid=None):
-    from scipy.cluster.hierarchy import leaves_list
-    n=len(labels); labels=[str(l) for l in labels]; lo=leaves_list(Z); ly={int(l):i for i,l in enumerate(lo)}
-    cy={i:ly[i] for i in range(n)}; cx={i:0.0 for i in range(n)}; fig=go.Figure()
-    for k,row in enumerate(Z):
-        i,j,d=int(row[0]),int(row[1]),float(row[2]); yi,yj=cy[i],cy[j]; xi,xj=cx[i],cx[j]
-        if support is not None and k<len(support):
-            s=support[k]; col="#2ecc71" if s>=70 else "#f39c12" if s>=50 else "#e74c3c"
-        else: col="#3498db"
-        fig.add_trace(go.Scatter(x=[xi,d],y=[yi,yi],mode='lines',line=dict(color=col,width=2),hoverinfo='skip',showlegend=False))
-        fig.add_trace(go.Scatter(x=[xj,d],y=[yj,yj],mode='lines',line=dict(color=col,width=2),hoverinfo='skip',showlegend=False))
-        fig.add_trace(go.Scatter(x=[d,d],y=[yi,yj],mode='lines',line=dict(color=col,width=2),hoverinfo='skip',showlegend=False))
-        ni=n+k; cy[ni]=(yi+yj)/2; cx[ni]=d
-        if support is not None and k<len(support):
-            s=support[k]
-            fig.add_annotation(x=d,y=(yi+yj)/2,text=f"<b>{int(s)}</b>",showarrow=False,font=dict(size=10,color=col),yshift=8,bgcolor="white",borderpad=2)
-    for leaf,y in ly.items():
-        fig.add_annotation(x=0,y=y,text=f"<b>{labels[leaf]}</b>",showarrow=False,xanchor='right',xshift=-8,font=dict(size=12,color="#2c3e50"))
-    if mid:
-        fig.add_vline(x=mid["midpoint"],line_dash="dot",line_color="purple",annotation_text=f"Mid {mid['midpoint']:.3f}",annotation_position="top")
-    fig.update_layout(title=title,xaxis_title="Distance de Reynolds",yaxis=dict(showticklabels=False,showgrid=False,zeroline=False),height=max(500,n*35),margin=dict(l=120,r=40,t=80,b=40),plot_bgcolor='white')
-    return fig
 
 @cache_data
 def gwas_pairwise(gt, snp_df, labels, ra, rb, maf_min=0.05, method="allelic"):
@@ -601,10 +575,41 @@ def gwas_pairwise(gt, snp_df, labels, ra, rb, maf_min=0.05, method="allelic"):
             except: continue
         hs=(2*pA*(1-pA)*len(gA)+2*pB*(1-pB)*len(gB))/(len(gA)+len(gB))
         pb=(pA*len(gA)+pB*len(gB))/(len(gA)+len(gB)); ht=2*pb*(1-pb); fv=(ht-hs)/ht if ht>1e-9 else 0.0
-        rows.append({"SNP":snp.iloc[j]["SNP"],"CHR":str(snp.iloc[j]["CHR"]),"BP":int(snp.iloc[j]["BP"]),
-                     "freq_A":round(pA,4),"freq_B":round(pB,4),"delta_freq":round(pA-pB,4),
-                     "MAF":round(mj,4),"chi2":round(chi2,4),"P":p,"FST_snp":round(fv,4),
-                     "n_A":len(gA),"n_B":len(gB)})
+        rows.append({"SNP":snp.iloc[j]["SNP"],"CHR":str(snp.iloc[j]["CHR"]),"BP":int(snp.iloc[j]["BP"]),"freq_A":round(pA,4),"freq_B":round(pB,4),"delta_freq":round(pA-pB,4),"MAF":round(mj,4),"chi2":round(chi2,4),"P":p,"FST_snp":round(fv,4),"n_A":len(gA),"n_B":len(gB)})
+    df=pd.DataFrame(rows)
+    if not df.empty: df=df.sort_values("P").reset_index(drop=True)
+    return df
+
+@cache_data
+def gwas_pairwise_group(gt, snp_df, groups, ga, gb, maf_min=0.05, method="allelic"):
+    groups=np.asarray(groups).astype(str); mask=np.isin(groups,[ga,gb])
+    if mask.sum()<20: raise ValueError(f"<20 individus pour {ga} vs {gb}")
+    gab=gt[mask]; y=(groups[mask]==ga).astype(int); snp=snp_df.reset_index(drop=True); n=min(gab.shape[1],len(snp))
+    gab=gab[:,:n]; snp=snp.iloc[:n].reset_index(drop=True); rows=[]
+    for j in range(n):
+        g=gab[:,j]; gA=g[y==1]; gB=g[y==0]; gA=gA[~np.isnan(gA)]; gB=gB[~np.isnan(gB)]
+        if len(gA)<5 or len(gB)<5: continue
+        pA=gA.mean()/2.0; pB=gB.mean()/2.0; tot=(gA.sum()+gB.sum())/(2*(len(gA)+len(gB))); mj=min(tot,1-tot)
+        if mj<maf_min: continue
+        if method=="allelic":
+            tab=np.array([[2*len(gA)-gA.sum(),gA.sum()],[2*len(gB)-gB.sum(),gB.sum()]])
+            try: chi2,p,_,_=stats.chi2_contingency(tab,correction=False)
+            except: continue
+        else:
+            X=np.column_stack([np.ones(len(y)),g]); val=~np.isnan(X).any(1); Xv=X[val]; yv=y[val]
+            try:
+                beta=np.zeros(2)
+                for _ in range(15):
+                    eta=Xv@beta; mu=1/(1+np.exp(-np.clip(eta,-500,500)))
+                    W=np.diag(mu*(1-mu)+1e-9); z=eta+(yv-mu)/(mu*(1-mu)+1e-9)
+                    bn=np.linalg.inv(Xv.T@W@Xv)@(Xv.T@W@z)
+                    if np.max(np.abs(bn-beta))<1e-6: beta=bn; break
+                    beta=bn
+                se=np.sqrt(np.diag(np.linalg.inv(Xv.T@W@Xv))); zv=beta[-1]/se[-1]; chi2=zv**2; p=float(stats.norm.sf(abs(zv))*2)
+            except: continue
+        hs=(2*pA*(1-pA)*len(gA)+2*pB*(1-pB)*len(gB))/(len(gA)+len(gB))
+        pb=(pA*len(gA)+pB*len(gB))/(len(gA)+len(gB)); ht=2*pb*(1-pb); fv=(ht-hs)/ht if ht>1e-9 else 0.0
+        rows.append({"SNP":snp.iloc[j]["SNP"],"CHR":str(snp.iloc[j]["CHR"]),"BP":int(snp.iloc[j]["BP"]),"freq_A":round(pA,4),"freq_B":round(pB,4),"delta_freq":round(pA-pB,4),"MAF":round(mj,4),"chi2":round(chi2,4),"P":p,"FST_snp":round(fv,4),"n_A":len(gA),"n_B":len(gB)})
     df=pd.DataFrame(rows)
     if not df.empty: df=df.sort_values("P").reset_index(drop=True)
     return df
@@ -613,31 +618,22 @@ def gwas_pairwise(gt, snp_df, labels, ra, rb, maf_min=0.05, method="allelic"):
 def get_pairs(labels):
     r=sorted(pd.unique(labels).astype(str)); return r,[(r[i],r[j]) for i in range(len(r)) for j in range(i+1,len(r))]
 
-# ═══════════════════════════════════════════════════════════
-# ANNOTATION EN cM (distance génétique variable)
-# ═══════════════════════════════════════════════════════════
-
 def _snp_cm(snp_df_full, snp_id):
     try:
         row = snp_df_full[snp_df_full["SNP"].astype(str) == str(snp_id)]
         if row.empty: return None
         cm = row["CM"].iloc[0]
         return float(cm) if pd.notna(cm) else None
-    except Exception:
-        return None
+    except Exception: return None
 
 def _cm_window_to_bp(snp_df_full, chrom, center_cm, window_cm):
     sub = snp_df_full[snp_df_full["CHR"].astype(str) == str(chrom)].copy()
     if sub.empty: return None
     cm_vals = sub["CM"].values.astype(float)
     if np.all(cm_vals == 0): return None
-    sub = sub.sort_values("CM").reset_index(drop=True)
-    cm_sorted = sub["CM"].values
-    bp_sorted = sub["BP"].values
-    lo_cm = max(cm_sorted.min(), center_cm - window_cm)
-    hi_cm = min(cm_sorted.max(), center_cm + window_cm)
-    bp_lo = float(np.interp(lo_cm, cm_sorted, bp_sorted))
-    bp_hi = float(np.interp(hi_cm, cm_sorted, bp_sorted))
+    sub = sub.sort_values("CM").reset_index(drop=True); cm_sorted = sub["CM"].values; bp_sorted = sub["BP"].values
+    lo_cm = max(cm_sorted.min(), center_cm - window_cm); hi_cm = min(cm_sorted.max(), center_cm + window_cm)
+    bp_lo = float(np.interp(lo_cm, cm_sorted, bp_sorted)); bp_hi = float(np.interp(hi_cm, cm_sorted, bp_sorted))
     return int(min(bp_lo, bp_hi)), int(max(bp_lo, bp_hi))
 
 def _bp_to_cm(snp_df_full, chrom, bp):
@@ -649,52 +645,25 @@ def _bp_to_cm(snp_df_full, chrom, bp):
     return float(np.interp(bp, sub["BP"].values, sub["CM"].values))
 
 def annotate_genes_cm(snp_target, snp_df_full, gff, window_cm=10, window_kb_fallback=100):
-    results = []
-    has_cm = not np.all(snp_df_full["CM"].astype(float).values == 0)
+    results = []; has_cm = not np.all(snp_df_full["CM"].astype(float).values == 0)
     for _, s in snp_target.iterrows():
-        chrom   = str(s["CHR"])
-        snp_id  = s.get("SNP", s.get("ID", ""))
-        bp_pos  = int(s.get("BP", s.get("POS", s.get("START", 0))))
-        cm_pos  = s.get("CM", None)
-        if cm_pos is None or pd.isna(cm_pos):
-            cm_pos = _snp_cm(snp_df_full, snp_id)
+        chrom = str(s["CHR"]); snp_id = s.get("SNP", ""); bp_pos = int(s.get("BP", 0)); cm_pos = s.get("CM", None)
+        if cm_pos is None or pd.isna(cm_pos): cm_pos = _snp_cm(snp_df_full, snp_id)
         bp_range = None; method = ""
         if has_cm and cm_pos is not None and not pd.isna(cm_pos):
             bp_range = _cm_window_to_bp(snp_df_full, chrom, float(cm_pos), window_cm)
             if bp_range is not None: method = f"{window_cm} cM"
-        if bp_range is None:
-            w = window_kb_fallback * 1000
-            bp_range = (bp_pos - w, bp_pos + w)
-            method = f"±{window_kb_fallback} kb (fallback)"
-        msk = ((gff["CHR"].astype(str) == chrom)
-               & (gff["END"] >= bp_range[0])
-               & (gff["START"] <= bp_range[1]))
-        ng = gff[msk]
+        if bp_range is None: w = window_kb_fallback * 1000; bp_range = (bp_pos - w, bp_pos + w); method = f"±{window_kb_fallback} kb"
+        msk = ((gff["CHR"].astype(str) == chrom) & (gff["END"] >= bp_range[0]) & (gff["START"] <= bp_range[1])); ng = gff[msk]
         for _, g in ng.iterrows():
-            dist_bp = min(abs(g["START"] - bp_pos), abs(g["END"] - bp_pos))
-            dist_kb = dist_bp / 1000.0
-            dist_cm = None
+            dist_bp = min(abs(g["START"] - bp_pos), abs(g["END"] - bp_pos)); dist_kb = dist_bp / 1000.0; dist_cm = None
             if method.endswith("cM"):
-                cm_snp  = _bp_to_cm(snp_df_full, chrom, bp_pos)
-                cm_gene = _bp_to_cm(snp_df_full, chrom, (g["START"] + g["END"]) / 2)
-                if cm_snp is not None and cm_gene is not None:
-                    dist_cm = abs(cm_gene - cm_snp)
-            results.append({
-                "SNP":          snp_id,
-                "CHR":          chrom,
-                "SNP_POS_BP":   bp_pos,
-                "SNP_POS_CM":   round(float(cm_pos), 2) if cm_pos else None,
-                "GENE":         g["GENE"],
-                "GENE_START":   int(g["START"]),
-                "GENE_END":     int(g["END"]),
-                "DIST_KB":      round(dist_kb, 2),
-                "DIST_CM":      round(dist_cm, 2) if dist_cm is not None else None,
-                "WINDOW":       method,
-            })
+                cm_snp = _bp_to_cm(snp_df_full, chrom, bp_pos); cm_gene = _bp_to_cm(snp_df_full, chrom, (g["START"] + g["END"]) / 2)
+                if cm_snp is not None and cm_gene is not None: dist_cm = abs(cm_gene - cm_snp)
+            results.append({"SNP": snp_id,"CHR": chrom,"SNP_POS_BP": bp_pos,"SNP_POS_CM": round(float(cm_pos), 2) if cm_pos else None,"GENE": g["GENE"],"GENE_START": int(g["START"]),"GENE_END": int(g["END"]),"DIST_KB": round(dist_kb, 2),"DIST_CM": round(dist_cm, 2) if dist_cm is not None else None,"WINDOW": method})
     df = pd.DataFrame(results)
     if not df.empty:
-        sort_col = "DIST_CM" if has_cm else "DIST_KB"
-        df = df.sort_values(["SNP", sort_col]).reset_index(drop=True)
+        sort_col = "DIST_CM" if has_cm else "DIST_KB"; df = df.sort_values(["SNP", sort_col]).reset_index(drop=True)
     return df
 
 def annotate_genes(snp_df, gff, wk=50):
@@ -704,12 +673,9 @@ def annotate_genes(snp_df, gff, wk=50):
         msk=(gff["CHR"]==ch)&(gff["START"]<=pos+w)&(gff["END"]>=pos-w); ng=gff[msk]
         if not ng.empty:
             for _,g in ng.iterrows():
-                res.append({"SNP":s.get("SNP",f"{ch}:{pos}"),"CHR":ch,"SNP_POS":pos,
-                            "GENE":g["GENE"],"GENE_START":g["START"],"GENE_END":g["END"],
-                            "DIST_KB":round(abs(g["START"]-pos)/1000.0,2)})
+                res.append({"SNP":s.get("SNP",f"{ch}:{pos}"),"CHR":ch,"SNP_POS":pos,"GENE":g["GENE"],"GENE_START":g["START"],"GENE_END":g["END"],"DIST_KB":round(abs(g["START"]-pos)/1000.0,2)})
     return pd.DataFrame(res)
 
-# ── GWAS ──
 def _vc_delta(Y, X0, K):
     n=len(Y); d,U=np.linalg.eigh(K); d=np.maximum(d,0); Yt=U.T@Y; X0t=U.T@X0
     def nll(dl):
@@ -732,8 +698,7 @@ def run_gwas(gt, pheno, K, covs, maf_min=0.05, miss_max=0.05, use_lmm=True, is_b
     X0=np.ones((len(Y),1)) if covs is None or covs.size==0 else np.column_stack([np.ones(len(Y)),np.asarray(covs)[valid]])
     X0=X0[:,np.std(X0,axis=0)>1e-10]
     if use_lmm and not is_bin:
-        dl=_vc_delta(Y,X0,Kv); d,U=np.linalg.eigh(Kv); d=np.maximum(d,0)
-        w=1.0/np.sqrt(dl*d+1.0); Yt=(U.T@Y)*w; X0t=(U.T@X0)*w[:,None]
+        dl=_vc_delta(Y,X0,Kv); d,U=np.linalg.eigh(Kv); d=np.maximum(d,0); w=1.0/np.sqrt(dl*d+1.0); Yt=(U.T@Y)*w; X0t=(U.T@X0)*w[:,None]
     else: Yt,X0t=Y,X0
     out={"SNP_idx":[],"MAF":[],"BETA":[],"SE":[],"T":[],"P":[]}
     for j in range(gv.shape[1]):
@@ -880,18 +845,11 @@ def plot_gene_track(si, gff, wk=50):
         fig.add_trace(go.Scatter(x=[g["START"]/1e6,g["END"]/1e6],y=[i,i],mode="lines",line=dict(width=10,color="royalblue"),name=g["GENE"],text=[g["GENE"],g["GENE"]],hoverinfo="text"))
     fig.add_vline(x=pos/1e6,line_dash="dash",line_color="red",annotation_text=f"SNP: {si.get('SNP','')}")
     fig.update_layout(title=f"Gènes CHR{ch}",xaxis_title="Pos (Mb)",yaxis=dict(showticklabels=False),height=400+len(rg)*20); return fig
-    # ═══════════════════════════════════════════════════════════════
-# §16 — INTERFACE STREAMLIT (Bloc C conforme + Annotation cM)
-# ═══════════════════════════════════════════════════════════════
 
-_KEYS = ["gt","ind_df","snp_df","gt_filt","ind_filt","snp_filt",
-         "gt_pre","ind_pre","snp_pre","gt_pruned","snp_pruned","qc_stats",
-         "pca_s","pca_v","mds_c","king_K","fst","fst_M","fst_pops",
-         "admix_Q","admix_K","cv_res","ld_df","roh_df","froh","ne_dict",
-         "reyn_D","reyn_pops","pheno_df","gwas_res","gwas_pheno","lambda_gc",
-         "gebv_df","gblup_stats","ann_df","_plink","_vcf","mapping_df",
-         "fst_snp_df","win_fst","taj_df","taj_race","css_df","pair_res",
-         "nj_result","nj_mid","sel_gff","sel_ann","scan_df"]
+# ============================================================
+# INTERFACE STREAMLIT
+# ============================================================
+_KEYS = ["gt","ind_df","snp_df","gt_filt","ind_filt","snp_filt","gt_pre","ind_pre","snp_pre","gt_pruned","snp_pruned","qc_stats","pca_s","pca_v","mds_c","king_K","fst","fst_M","fst_pops","admix_Q","admix_K","cv_res","ld_df","roh_df","froh","ne_dict","reyn_D","reyn_pops","pheno_df","gwas_res","gwas_pheno","lambda_gc","gebv_df","gblup_stats","ann_df","_plink","_vcf","mapping_df","fst_snp_df","win_fst","taj_df","taj_race","css_df","pair_res","pair_res_race","pair_res_group","pair_name_race","pair_name_group","nj_result","nj_mid","sel_gff","sel_ann","scan_df"]
 
 def init_state():
     for k in _KEYS:
@@ -899,8 +857,8 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v8.6")
-    st.caption("Bloc C conforme · Annotation cM · SNP · GWAS · GBLUP")
+    st.title("🐄 Bovine Genomics Pipeline v9.0")
+    st.caption("Race × Race | Groupe × Groupe | Comparaison intégrée")
 
     # ── SIDEBAR ──
     with st.sidebar:
@@ -959,7 +917,7 @@ def main():
             c1.metric("Individus",s["n_ind_final"],delta=-s["excluded_ind"]); c2.metric("SNPs",s["n_snp_final"],delta=-s["excluded_snp"])
             c3.metric("Pré-outliers",f"{st.session_state.gt_pre.shape[1]}" if st.session_state.gt_pre is not None else "N/A")
             c4.metric("Outliers",s["trace"].get("het",0))
-            st.plotly_chart(plot_missing(miss_ind(st.session_state.gt),miss_snp(st.session_state.gt)),use_container_width=True)
+            st.plotly_chart(plot_missing(miss_ind(st.session_state.gt),miss_snp(st.session_state.gt)),use_container_width=True,key="plot_missing_qc")
             st.json(s["trace"])
 
     # ═══════════════ LD ═══════════════
@@ -974,7 +932,7 @@ def main():
                 st.session_state.ld_df=ld_decay(st.session_state.gt_pruned,st.session_state.snp_pruned["BP"].values)
             if st.session_state.ld_df is not None:
                 f=plot_ld(st.session_state.ld_df)
-                if f: st.plotly_chart(f,use_container_width=True)
+                if f: st.plotly_chart(f,use_container_width=True,key="plot_ld_decay")
 
     # ═══════════════ Structure ═══════════════
     with tabs[2]:
@@ -985,8 +943,8 @@ def main():
                 st.session_state.mds_c=mds_analysis(gu,5); st.session_state.king_K=king_mat(gu); st.success("✅")
             except Exception as e: st.error(f"❌ {e}")
         if st.session_state.pca_s is not None:
-            st.plotly_chart(plot_pca(st.session_state.pca_s,st.session_state.pca_v,st.session_state.ind_filt["FID"].values),use_container_width=True)
-            st.plotly_chart(plot_mds(st.session_state.mds_c,st.session_state.ind_filt["FID"].values),use_container_width=True)
+            st.plotly_chart(plot_pca(st.session_state.pca_s,st.session_state.pca_v,st.session_state.ind_filt["FID"].values),use_container_width=True,key="plot_pca_tab")
+            st.plotly_chart(plot_mds(st.session_state.mds_c,st.session_state.ind_filt["FID"].values),use_container_width=True,key="plot_mds_tab")
 
     # ═══════════════ Admixture ═══════════════
     with tabs[3]:
@@ -999,7 +957,7 @@ def main():
                 except Exception as e: st.error(f"❌ {e}")
             if st.session_state.admix_Q is not None:
                 f,_=plot_admix(st.session_state.admix_Q,st.session_state.ind_filt["IID"].values,st.session_state.ind_filt["FID"].values,st.session_state.admix_K)
-                st.plotly_chart(f,use_container_width=True)
+                st.plotly_chart(f,use_container_width=True,key="plot_admix_tab")
 
     # ═══════════════ Démographie ═══════════════
     with tabs[4]:
@@ -1016,9 +974,9 @@ def main():
             except Exception as e: st.error(f"❌ {e}")
         if st.session_state.froh is not None:
             df=pd.DataFrame({"FROH":st.session_state.froh,"Pop":st.session_state.ind_filt["FID"].values})
-            st.plotly_chart(px.histogram(df,x="FROH",color="Pop",nbins=50,title="FROH"),use_container_width=True)
+            st.plotly_chart(px.histogram(df,x="FROH",color="Pop",nbins=50,title="FROH"),use_container_width=True,key="plot_roh_hist")
 
-    # ═══════════════ SÉLECTION (Bloc C) ═══════════════
+    # ═══════════════ SÉLECTION ═══════════════
     with tabs[5]:
         st.subheader("🔍 Sélection & structure des populations")
 
@@ -1036,9 +994,8 @@ def main():
             sf=st.session_state.fst_snp_df if st.session_state.get("fst_snp_df") is not None else st.session_state.snp_filt
             nf=min(len(st.session_state.fst),len(sf))
             dff=pd.DataFrame({"SNP":sf["SNP"].values[:nf],"CHR":sf["CHR"].values[:nf],"BP":sf["BP"].values[:nf],"FST":st.session_state.fst[:nf]})
-            st.plotly_chart(plot_manhattan(dff,yc="FST",title="FST par SNP"),use_container_width=True)
+            st.plotly_chart(plot_manhattan(dff,yc="FST",title="FST par SNP"),use_container_width=True,key="plot_manh_fst_snp")
 
-        # ── Arbre NJ ──
         st.divider(); st.subheader("🌳 Arbre NJ (bootstrap + midpoint)")
         if st.session_state.reyn_D is not None:
             c1,c2=st.columns(2); nb=c1.slider("Bootstrap",10,500,100,10,key="nj_boot"); ro=c2.selectbox("Root",["Non-enraciné","Midpoint"],key="nj_root")
@@ -1057,14 +1014,154 @@ def main():
                 c1,c2,c3,c4=st.columns(4); c1.metric("Races",len(r["pops"])); c2.metric("Nœuds",len(r["support"]))
                 c3.metric("Supp≥70%",f"{(r['support']>=70).sum()}/{len(r['support'])}"); c4.metric("Dist max",f"{mp['max_dist']:.4f}" if mp else "N/A")
                 if mp: st.info(f"Midpoint entre **{mp['leaf_i']}** et **{mp['leaf_j']}** ({mp['midpoint']:.4f})")
+                # Utilisation d'une clé unique pour l'arbre
                 f=plot_tree(r["Z"],r["pops"],r["support"],title=f"NJ ({nb} boot)",mid=mp if ro=="Midpoint" else None)
-                st.plotly_chart(f,use_container_width=True)
-                with st.expander("📄 Newick"):
-                    st.code(r["newick"],language="text")
-                st.download_button("⬇ .nwk",r["newick"].encode(),"tree.nwk","text/plain")
+                st.plotly_chart(f,use_container_width=True,key="plot_nj_tree")
+
+        # ── GWAS pairwise (2 modes + Comparaison) ──
+        st.divider()
+        st.subheader("🧬 GWAS case-control (Race × Race OU Groupe × Groupe)")
+        
+        if st.session_state.gt_filt is not None:
+            gu = (st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt)
+            su = (st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt)
+            iu = st.session_state.ind_filt
+            
+            mode_gwas = st.radio(
+                "🎯 Mode de comparaison",
+                ["🏷️ Race × Race (individuel)",
+                 "📊 Groupe × Groupe (regroupement)",
+                 "⚖️ Comparer les deux modes"],
+                horizontal=True, key="gwas_mode")
+            
+            st.divider()
+            
+            # ============ MODE 1 : RACE × RACE ============
+            if mode_gwas.startswith("🏷️"):
+                st.markdown("### 🏷️ Mode RACE × RACE")
+                races, pairs = get_pairs(iu["FID"].astype(str).values)
+                c1, c2 = st.columns(2)
+                ra = c1.selectbox("Race A", races, index=0, key="pa")
+                rb = c2.selectbox("Race B", races, index=1 if len(races) > 1 else 0, key="pb")
+                c1, c2 = st.columns(2)
+                mtd = c1.selectbox("Méthode", ["allelic", "logistic"], key="pm")
+                mf = c2.slider("MAF", 0.0, 0.3, 0.05, key="pmf")
+                
+                if ra != rb and st.button(f"🚀 {ra} vs {rb}", type="primary", key="pr_btn"):
+                    try:
+                        with st.spinner(f"{ra} vs {rb}..."):
+                            r = gwas_pairwise(gu, su, iu["FID"].astype(str).values, ra, rb, float(mf), mtd)
+                            st.session_state["pair_res_race"] = r
+                            st.session_state["pair_name_race"] = f"{ra} vs {rb}"
+                        if not r.empty:
+                            st.success(f"✅ {len(r)} SNPs · {(r['P'] < 0.05/len(r)).sum()} Bonf")
+                            st.dataframe(r.head(10), use_container_width=True)
+                    except Exception as e:
+                        st.error(f"❌ {e}")
+
+            # ============ MODE 2 : GROUPE × GROUPE ============
+            elif mode_gwas.startswith("📊"):
+                st.markdown("### 📊 Mode GROUPE × GROUPE")
+                critere = st.selectbox("Critère", list(GROUPES_DEFAULT.keys()) + ["➕ CSV"], key="grp_critere")
+                
+                if critere == "➕ CSV":
+                    f = st.file_uploader("CSV (RACE, GROUPE)", type=["csv"], key="grp_csv")
+                    if f:
+                        mdf = pd.read_csv(f)
+                        group_map = dict(zip(mdf["RACE"].astype(str).str.upper(), mdf["GROUPE"].astype(str)))
+                    else:
+                        st.stop()
+                else:
+                    group_map = make_group_map(GROUPES_DEFAULT[critere])
+                
+                iu_g = apply_group_mapping(iu, group_map)
+                groups = sorted([g for g in iu_g["FID_GROUPE"].unique() if g != "AUTRE"])
+                
+                c1, c2 = st.columns(2)
+                ga = c1.selectbox("Groupe A", groups, index=0, key="grp_a")
+                gb = c2.selectbox("Groupe B", groups, index=1 if len(groups) > 1 else 0, key="grp_b")
+                mtd_g = c1.selectbox("Méthode", ["allelic", "logistic"], key="pm_grp")
+                mf_g = c2.slider("MAF", 0.0, 0.3, 0.05, key="pmf_grp")
+                
+                nA = (iu_g["FID_GROUPE"] == ga).sum()
+                nB = (iu_g["FID_GROUPE"] == gb).sum()
+                st.info(f"📊 **{ga}** ({nA} ind) vs **{gb}** ({nB} ind)")
+                
+                if ga != gb and st.button(f"🚀 {ga} vs {gb}", type="primary", key="pr_btn_grp"):
+                    try:
+                        with st.spinner(f"{ga} vs {gb}..."):
+                            r = gwas_pairwise_group(gu, su, iu_g["FID_GROUPE"].values, ga, gb, float(mf_g), mtd_g)
+                            st.session_state["pair_res_group"] = r
+                            st.session_state["pair_name_group"] = f"{ga} vs {gb} ({critere})"
+                        if not r.empty:
+                            st.success(f"✅ {len(r)} SNPs · {(r['P'] < 0.05/len(r)).sum()} Bonf")
+                            st.dataframe(r.head(10), use_container_width=True)
+                    except Exception as e:
+                        st.error(f"❌ {e}")
+
+            # ============ MODE 3 : COMPARAISON ============
+            else:
+                st.markdown("### ⚖️ Comparaison Race × Race vs Groupe × Groupe")
+                res_r = st.session_state.get("pair_res_race")
+                res_g = st.session_state.get("pair_res_group")
+                
+                if res_r is None or res_g is None:
+                    st.warning("⚠️ Vous devez d'abord lancer une analyse dans le mode RACE et une dans le mode GROUPE pour pouvoir les comparer.")
+                    st.info("Allez dans '🏷️ Race × Race', lancez une analyse. Puis allez dans '📊 Groupe × Groupe', lancez-en une. Revenez ici.")
+                else:
+                    name_r = st.session_state.get("pair_name_race", "Race")
+                    name_g = st.session_state.get("pair_name_group", "Groupe")
+                    
+                    c1, c2 = st.columns(2)
+                    c1.metric(f"🏷️ {name_r}", f"{len(res_r)} SNPs", delta=f"{(res_r['P']<0.05/len(res_r)).sum()} Bonf")
+                    c2.metric(f"📊 {name_g}", f"{len(res_g)} SNPs", delta=f"{(res_g['P']<0.05/len(res_g)).sum()} Bonf")
+                    
+                    snps_r = set(res_r["SNP"])
+                    snps_g = set(res_g["SNP"])
+                    common = snps_r.intersection(snps_g)
+                    only_r = snps_r - snps_g
+                    only_g = snps_g - snps_r
+                    
+                    st.markdown("#### 🔍 Analyse de recouvrement")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("SNPs communs", len(common))
+                    c2.metric("Uniques RACE", len(only_r))
+                    c3.metric("Uniques GROUPE", len(only_g))
+                    
+                    if len(common) > 0:
+                        st.success(f"✅ **{len(common)} SNPs** sont détectés dans LES DEUX approches. Ce sont vos candidats les plus robustes.")
+                        df_common = res_r[res_r["SNP"].isin(common)][["SNP", "CHR", "BP", "FST_snp", "P"]].rename(columns={"P": "P_race", "FST_snp": "FST_race"})
+                        df_common = df_common.merge(
+                            res_g[res_g["SNP"].isin(common)][["SNP", "P", "FST_snp"]].rename(columns={"P": "P_group", "FST_snp": "FST_group"}),
+                            on="SNP", how="left"
+                        ).sort_values("P_race")
+                        
+                        st.dataframe(df_common, use_container_width=True)
+                        st.download_button(
+                            "⬇ Télécharger les SNPs communs",
+                            df_common.to_csv(index=False).encode(),
+                            "snps_communs_race_vs_group.csv", "text/csv"
+                        )
+                    else:
+                        st.warning("⚠️ Aucun SNP commun. Les deux modes ont détecté des signaux totalement différents. Vérifiez les p-values et les effectifs.")
+
+                    st.markdown("#### 📈 Comparaison des p-values")
+                    if not res_r.empty and not res_g.empty:
+                        m = res_r[["SNP", "P"]].rename(columns={"P": "P_race"}).merge(
+                            res_g[["SNP", "P"]].rename(columns={"P": "P_group"}), on="SNP", how="outer"
+                        )
+                        m["logP_race"] = -np.log10(m["P_race"].clip(1e-300, 1))
+                        m["logP_group"] = -np.log10(m["P_group"].clip(1e-300, 1))
+                        m = m.dropna()
+                        fig = px.scatter(m, x="logP_race", y="logP_group", 
+                                         hover_data=["SNP"],
+                                         title="Corrélation des signaux (-log10 P)")
+                        fig.add_hline(y=-np.log10(0.05/len(res_g)), line_dash="dash", line_color="red")
+                        fig.add_vline(x=-np.log10(0.05/len(res_r)), line_dash="dash", line_color="red")
+                        st.plotly_chart(fig, use_container_width=True, key="plot_scatter_compare")
 
         # ═══════════════════════════════════════════════════════
-        # BLOC C — SIGNATURES DE SÉLECTION (3 méthodes)
+        # SIGNATURES DE SÉLECTION (3 méthodes)
         # ═══════════════════════════════════════════════════════
         st.divider()
         st.subheader("🧬 Signatures de sélection (Bloc C)")
@@ -1080,7 +1177,6 @@ def main():
                         "8.3.3 — Score composite (CSS)"],
                        horizontal=True, key="sel_m")
 
-            # ── 8.3.1 FST fenêtres ──
             if ms.startswith("8.3.1"):
                 st.markdown("**Idée** : une région sous sélection divergente présente un FST élevé sur plusieurs SNP consécutifs. Le moyennage en fenêtres réduit le bruit.")
                 c1,c2,c3=st.columns(3)
@@ -1090,22 +1186,19 @@ def main():
 
                 if st.button("▶ Scanner FST par fenêtres",type="primary",key="wf_btn"):
                     with st.spinner("Scan FST..."):
-                        w=windowed_fst(gu,su,lab,ws,sp)
-                        w=detect_outliers(w,zt)
-                        st.session_state.win_fst=w
+                        w=windowed_fst(gu,su,lab,ws,sp); w=detect_outliers(w,zt); st.session_state.win_fst=w
                     n_out=w['OUTLIER'].sum() if 'OUTLIER' in w else 0
                     st.success(f"✅ {len(w)} fenêtres · {n_out} outliers (z ≥ {zt})")
 
                 if st.session_state.get("win_fst") is not None:
                     w=st.session_state.win_fst
-                    st.plotly_chart(plot_win_manh(w,'MEAN_FST',f'FST fenêtres — seuil z={zt}'),use_container_width=True)
+                    st.plotly_chart(plot_win_manh(w,'MEAN_FST',f'FST fenêtres — seuil z={zt}'),use_container_width=True,key="plot_win_fst")
                     st.markdown(f"### 🏆 Top 20 fenêtres (par FST moyen)")
                     cols_show=['CHR','START','END','N_SNP','MEAN_FST','MAX_FST','Z_FST','TOP_SNP']
                     cols_show=[c for c in cols_show if c in w.columns]
                     st.dataframe(w.head(20)[cols_show],use_container_width=True)
                     st.download_button("⬇ Export fenêtres CSV",w.to_csv(index=False).encode(),"fst_windows.csv","text/csv")
 
-            # ── 8.3.2 Tajima's D ──
             elif ms.startswith("8.3.2"):
                 st.markdown("**Idée** : D compare π et S. D < −2 → balayage récent. D > +2 → sélection balancée ou goulot.")
                 rs=st.selectbox("Race à analyser (min. 5 individus)",sorted(np.unique(lab)),key="tr")
@@ -1117,21 +1210,16 @@ def main():
                     if m.sum()<5: st.error(f"⚠️ {m.sum()} individus seulement (min. 5)")
                     else:
                         with st.spinner("Tajima..."):
-                            t=tajimas_scan(gu[m],su,wt,stp)
-                            st.session_state.taj_df=t; st.session_state.taj_race=rs
+                            t=tajimas_scan(gu[m],su,wt,stp); st.session_state.taj_df=t; st.session_state.taj_race=rs
                         st.success(f"✅ {len(t)} fenêtres calculées")
                 if st.session_state.get("taj_df") is not None and len(st.session_state.taj_df)>0:
                     t=st.session_state.taj_df
-                    c1,c2,c3=st.columns(3)
-                    c1.metric("Fenêtres",len(t))
-                    c2.metric("D < −2 (balayage)",(t['TAJIMA_D']<-2).sum())
-                    c3.metric("D > +2 (structure)",(t['TAJIMA_D']>2).sum())
-                    st.plotly_chart(plot_win_manh(t,'TAJIMA_D',f"Tajima D — {st.session_state.taj_race}"),use_container_width=True)
-                    st.markdown("### 🏆 20 fenêtres les plus négatives")
+                    c1,c2,c3=st.columns(3); c1.metric("Fenêtres",len(t))
+                    c2.metric("D < −2 (balayage)",(t['TAJIMA_D']<-2).sum()); c3.metric("D > +2 (structure)",(t['TAJIMA_D']>2).sum())
+                    st.plotly_chart(plot_win_manh(t,'TAJIMA_D',f"Tajima D — {st.session_state.taj_race}"),use_container_width=True,key="plot_tajima")
                     st.dataframe(t.sort_values('TAJIMA_D').head(20),use_container_width=True)
                     st.download_button("⬇ Export Tajima CSV",t.to_csv(index=False).encode(),f"tajima_{st.session_state.taj_race}.csv","text/csv")
 
-            # ── 8.3.3 CSS ──
             else:
                 st.markdown("**Idée** : combiner forte différenciation entre races (FST) et excès d'homozygotes (HOM).")
                 st.latex(r"CSS = |Z_{FST} \times Z_{HOM}|")
@@ -1141,65 +1229,31 @@ def main():
                     st.success(f"✅ {len(c)} SNPs scorés")
                 if st.session_state.get("css_df") is not None:
                     c=st.session_state.css_df
-                    # Visualisation : pseudo p-value exp(-CSS)
                     cp=c.copy(); cp["P_pseudo"]=np.exp(-cp["CSS"])
-                    st.plotly_chart(plot_manhattan(cp.rename(columns={"P_pseudo":"P"}),yc="P",title="Score composite CSS (pseudo p-value)"),use_container_width=True)
-                    st.caption("⚠️ Le graphique utilise exp(−CSS) uniquement pour la visualisation. CSS est un score de priorisation, pas un test statistique.")
-                    st.markdown("### 🏆 Top 20 SNP par CSS")
-                    cols_show=['SNP','CHR','BP','FST','HOM','MAF','Z_FST','Z_HOM','CSS']
-                    cols_show=[c for c in cols_show if c in c.columns]
-                    st.dataframe(c.head(20)[cols_show],use_container_width=True)
+                    st.plotly_chart(plot_manhattan(cp.rename(columns={"P_pseudo":"P"}),yc="P",title="Score composite CSS (pseudo p-value)"),use_container_width=True,key="plot_css_manh")
+                    st.caption("⚠️ Le graphique utilise exp(−CSS) uniquement pour la visualisation.")
+                    st.dataframe(c.head(20)[['SNP','CHR','BP','FST','HOM','MAF','Z_FST','Z_HOM','CSS']],use_container_width=True)
                     st.download_button("⬇ Export CSS CSV",c.to_csv(index=False).encode(),"css_scores.csv","text/csv")
 
-        # ── GWAS pairwise ──
-        st.divider(); st.subheader("🧬 GWAS entre races (case-control)")
-        if st.session_state.gt_filt is not None:
-            gu=st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
-            su=st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
-            iu=st.session_state.ind_filt; races,pairs=get_pairs(iu["FID"].astype(str).values)
-            st.write(f"**{len(races)} races** → **{len(pairs)} paires**")
-            c1,c2=st.columns(2); ra=c1.selectbox("Race A",races,index=0,key="pa"); rb=c2.selectbox("Race B",races,index=1 if len(races)>1 else 0,key="pb")
-            c1,c2=st.columns(2); mtd=c1.selectbox("Méthode",["allelic","logistic"],key="pm"); mf=c2.slider("MAF",0.0,0.3,0.05,key="pmf")
-            if ra==rb: st.warning("⚠️ Deux races différentes")
-            elif st.button(f"🚀 {ra} vs {rb}",type="primary",key="pr_btn"):
-                try:
-                    with st.spinner(f"{ra} vs {rb}..."):
-                        r=gwas_pairwise(gu,su,iu["FID"].astype(str).values,ra,rb,float(mf),mtd); st.session_state.pair_res=r
-                    if r.empty: st.warning("Vide")
-                    else:
-                        ns=(r["P"]<0.05/len(r)).sum()
-                        c1,c2,c3,c4=st.columns(4); c1.metric("SNPs",len(r)); c2.metric("Bonf",ns); c3.metric("FST moy",f"{r['FST_snp'].mean():.4f}")
-                        c4.metric("Δfreq max",f"{r['delta_freq'].abs().max():.3f}")
-                        st.plotly_chart(plot_manhattan(r,yc="P",title=f"{ra} vs {rb}"),use_container_width=True)
-                        st.dataframe(r.head(20),use_container_width=True)
-                        st.download_button(f"⬇ {ra} vs {rb}",r.to_csv(index=False).encode(),f"pair_{ra}_{rb}.csv","text/csv")
-                except Exception as e: st.error(f"❌ {e}")
-
         # ═══════════════════════════════════════════════════════
-        # ANNOTATION GÉNÉTIQUE EN cM (distance variable)
+        # ANNOTATION GÉNÉTIQUE EN cM
         # ═══════════════════════════════════════════════════════
         st.divider()
         st.subheader("🧬 Annotation des gènes (distance en cM)")
 
-        snp_full = (st.session_state.snp_pruned
-                    if st.session_state.snp_pruned is not None
-                    else st.session_state.snp_filt)
-        has_cm_data = (snp_full is not None
-                       and "CM" in snp_full.columns
-                       and not np.all(snp_full["CM"].astype(float).values == 0))
+        snp_full = (st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt)
+        has_cm_data = (snp_full is not None and "CM" in snp_full.columns and not np.all(snp_full["CM"].astype(float).values == 0))
 
-        if has_cm_data:
-            n_with_cm = (snp_full["CM"].astype(float) > 0).sum()
-            st.success(f"✅ {n_with_cm}/{len(snp_full)} SNPs ont une position cM valide — annotation génétique disponible")
-        else:
-            st.warning("⚠️ Toutes les positions CM sont à 0 dans votre MAP. Fallback en mode physique (kb).")
+        if has_cm_data: st.success(f"✅ { (snp_full['CM'].astype(float)>0).sum() }/{len(snp_full)} SNPs ont une position cM valide")
+        else: st.warning("⚠️ Toutes les positions CM sont à 0. Fallback en mode physique (kb).")
 
         gff_f=st.file_uploader("GFF3/GTF",type=["gff","gff3","gtf","gz"],key="sel_gff_file")
         sources=[]
         if st.session_state.get("win_fst") is not None and len(st.session_state.win_fst)>0: sources.append("FST outliers")
         if st.session_state.get("taj_df") is not None and len(st.session_state.taj_df)>0: sources.append("Tajima extrêmes")
         if st.session_state.get("css_df") is not None and len(st.session_state.css_df)>0: sources.append("CSS top")
-        if st.session_state.get("pair_res") is not None and len(st.session_state.pair_res)>0: sources.append("Pairwise top")
+        if st.session_state.get("pair_res_race") is not None and len(st.session_state.pair_res_race)>0: sources.append("Race Pairwise")
+        if st.session_state.get("pair_res_group") is not None and len(st.session_state.pair_res_group)>0: sources.append("Group Pairwise")
         sources.append("Manuel")
 
         if gff_f is not None:
@@ -1209,51 +1263,42 @@ def main():
                 st.success(f"✅ {len(gff)} gènes chargés")
 
                 c1,c2=st.columns(2)
-                metric=c1.radio("Unité de distance",["cM (génétique)","kb (physique)"],
-                                index=0 if has_cm_data else 1,horizontal=True,key="ann_metric")
+                metric=c1.radio("Unité de distance",["cM (génétique)","kb (physique)"],index=0 if has_cm_data else 1,horizontal=True,key="ann_metric")
                 if metric.startswith("cM"):
-                    window_cm=c2.slider("Fenêtre cM (chaque côté)",1,50,10,1,
-                                       help="Distance génétique variable. 1 cM ≈ 1 Mb en moyenne chez les bovins.")
+                    window_cm=c2.slider("Fenêtre cM (chaque côté)",1,50,10,1)
                     wk_fallback=100
                 else:
-                    wk_fallback=c2.slider("Fenêtre kb (chaque côté)",1,500,50,5,
-                                         help="Distance physique fixe.")
+                    wk_fallback=c2.slider("Fenêtre kb (chaque côté)",1,500,50,5)
                     window_cm=10
 
                 c1,c2=st.columns(2); src=c1.selectbox("Source SNPs",sources,key="ann_src")
-
                 to_ann=None
                 if src=="FST outliers":
-                    w=st.session_state.win_fst
-                    o=w[w.get("OUTLIER",False)==True] if "OUTLIER" in w else w.head(20)
-                    if len(o)==0: o=w.head(20)
-                    st.info(f"🎯 {len(o)} fenêtres")
+                    w=st.session_state.win_fst; o=w[w.get("OUTLIER",False)==True] if "OUTLIER" in w else w.head(20)
                     to_ann=o.head(50)[["CHR","START","TOP_SNP"]].rename(columns={"START":"BP","TOP_SNP":"SNP"})
                 elif src=="Tajima extrêmes":
                     t=st.session_state.taj_df; n=st.slider("N",5,100,20,key="ann_tj_n")
-                    ex=t.sort_values("TAJIMA_D").head(n)
-                    to_ann=ex[["CHR","MID"]].rename(columns={"MID":"BP"}); to_ann["SNP"]=[f"Taj_{i+1}" for i in range(len(to_ann))]
+                    ex=t.sort_values("TAJIMA_D").head(n); to_ann=ex[["CHR","MID"]].rename(columns={"MID":"BP"}); to_ann["SNP"]=[f"Taj_{i+1}" for i in range(len(to_ann))]
                 elif src=="CSS top":
                     n=st.slider("N",10,200,30,key="ann_cp_n"); to_ann=st.session_state.css_df.head(n)[["SNP","CHR","BP"]]
-                elif src=="Pairwise top":
-                    n=st.slider("N",10,200,30,key="ann_pr_n"); to_ann=st.session_state.pair_res.head(n)[["SNP","CHR","BP"]]
+                elif src in ("Race Pairwise", "Group Pairwise"):
+                    key_res = "pair_res_race" if src=="Race Pairwise" else "pair_res_group"
+                    n=st.slider("N",10,200,30,key="ann_pr_n"); to_ann=st.session_state[key_res].head(n)[["SNP","CHR","BP"]]
                 else:
                     c1,c2=st.columns(2); chm=c1.text_input("Chr","14",key="ann_mc"); pm=c2.number_input("Pos (bp)",0,200_000_000,25_000_000,100_000,key="ann_mp")
                     to_ann=pd.DataFrame({"SNP":[f"m_{chm}_{pm}"],"CHR":[str(chm)],"BP":[int(pm)]})
 
-                if to_ann is not None and len(to_ann)>0:
-                    if st.button("🔍 Annoter les gènes",type="primary",key="ann_btn"):
-                        with st.spinner("Recherche des gènes..."):
-                            if metric.startswith("cM"):
-                                ann=annotate_genes_cm(to_ann,snp_full,gff,window_cm=window_cm,window_kb_fallback=wk_fallback)
-                            else:
-                                ann=annotate_genes(to_ann,gff,wk=wk_fallback)
-                                if not ann.empty:
-                                    ann["WINDOW"]=f"±{wk_fallback} kb"
-                                    if "DIST_CM" not in ann.columns: ann["DIST_CM"]=None
-                            st.session_state.sel_ann=ann
-                        if ann.empty: st.warning(f"⚠️ Aucun gène trouvé")
-                        else: st.success(f"✅ {len(ann)} associations · {ann['GENE'].nunique()} gènes · {ann['SNP'].nunique()} SNPs")
+                if to_ann is not None and len(to_ann)>0 and st.button("🔍 Annoter les gènes",type="primary",key="ann_btn"):
+                    with st.spinner("Recherche..."):
+                        if metric.startswith("cM"): ann=annotate_genes_cm(to_ann,snp_full,gff,window_cm=window_cm,window_kb_fallback=wk_fallback)
+                        else:
+                            ann=annotate_genes(to_ann,gff,wk=wk_fallback)
+                            if not ann.empty:
+                                ann["WINDOW"]=f"±{wk_fallback} kb"
+                                if "DIST_CM" not in ann.columns: ann["DIST_CM"]=None
+                        st.session_state.sel_ann=ann
+                    if ann.empty: st.warning(f"⚠️ Aucun gène trouvé")
+                    else: st.success(f"✅ {len(ann)} associations · {ann['GENE'].nunique()} gènes")
 
                 if st.session_state.get("sel_ann") is not None and len(st.session_state.sel_ann)>0:
                     ann=st.session_state.sel_ann
@@ -1269,18 +1314,16 @@ def main():
                     si={"SNP":row["SNP"],"CHR":row["CHR"],"BP":row.get("SNP_POS_BP",row.get("SNP_POS",0))}
                     wk_viz=int(window_cm*10) if metric.startswith("cM") else wk_fallback
                     f=plot_gene_track(si,gff,wk_viz)
-                    if f: st.plotly_chart(f,use_container_width=True)
+                    if f: st.plotly_chart(f,use_container_width=True,key="plot_gene_track")
                     st.markdown("### 🏆 Gènes les plus proches (top 3 / SNP)")
-                    if "DIST_CM" in ann and ann["DIST_CM"].notna().any():
-                        top=ann.sort_values(["SNP","DIST_CM"]).groupby("SNP").head(3)[["SNP","GENE","DIST_CM","DIST_KB"]]
-                    else:
-                        top=ann.sort_values(["SNP","DIST_KB"]).groupby("SNP").head(3)[["SNP","GENE","DIST_KB"]]
+                    if "DIST_CM" in ann and ann["DIST_CM"].notna().any(): top=ann.sort_values(["SNP","DIST_CM"]).groupby("SNP").head(3)[["SNP","GENE","DIST_CM","DIST_KB"]]
+                    else: top=ann.sort_values(["SNP","DIST_KB"]).groupby("SNP").head(3)[["SNP","GENE","DIST_KB"]]
                     st.dataframe(top,use_container_width=True)
             except Exception as e: st.error(f"❌ {e}")
         else:
             st.info("💡 [Télécharger GFF3 bovin](https://ftp.ensembl.org/pub/current_gff3/bos_taurus/)")
 
-    # ═══════════════ GWAS ═══════════════
+    # ═══════════════ GWAS (Classique) ═══════════════
     with tabs[6]:
         st.markdown("### 1️⃣ Mapping ID")
         mf=st.file_uploader("CSV mapping (Animal + IID)",type=["csv","txt"],key="gwas_map")
@@ -1322,13 +1365,13 @@ def main():
                                 r=run_gwas(gg,ps.values,st.session_state.king_K,cv,is_bin=ib); r=annotate_gwas(r,sg)
                                 st.session_state.gwas_res=r; st.session_state.lambda_gc=lambda_gc(r["P"].values) if len(r) else np.nan
                             st.success(f"✅ {len(r)} SNPs · λGC={st.session_state.lambda_gc:.3f}")
-                            st.plotly_chart(plot_manhattan(r),use_container_width=True)
+                            st.plotly_chart(plot_manhattan(r),use_container_width=True,key="plot_gwas_manh_classic")
                         except Exception as e: st.error(f"❌ {e}")
 
     # ═══════════════ Post-GWAS ═══════════════
     with tabs[7]:
         if st.session_state.gwas_res is not None:
-            pip=fine_mapping(st.session_state.gwas_res); st.dataframe(pip[["SNP","P","PIP"]].head(10),use_container_width=True); st.plotly_chart(plot_pip(pip),use_container_width=True)
+            pip=fine_mapping(st.session_state.gwas_res); st.dataframe(pip[["SNP","P","PIP"]].head(10),use_container_width=True); st.plotly_chart(plot_pip(pip),use_container_width=True,key="plot_pip_postgwas")
         else: st.warning("Lancez GWAS d'abord")
 
     # ═══════════════ GBLUP ═══════════════
@@ -1342,11 +1385,11 @@ def main():
                     ps=pd.to_numeric(st.session_state.pheno_df[pc],errors="coerce")
                     with st.spinner("REML..."):
                         df,st_=run_gblup(gu,ps.values); st.session_state.gebv_df=df; st.session_state.gblup_stats=st_
-                    st.success("✅"); st.plotly_chart(plot_gblup(df),use_container_width=True); st.json(st_)
+                    st.success("✅"); st.plotly_chart(plot_gblup(df),use_container_width=True,key="plot_gblup"); st.json(st_)
                 except Exception as e: st.error(f"❌ {e}")
         else: st.warning("Chargez phénotypes")
 
-    # ═══════════════ Annotation dédiée ═══════════════
+    # ═══════════════ Annotation (Dédiée) ═══════════════
     with tabs[9]:
         gff_f=st.file_uploader("GFF3/GTF",type=["gff","gff3","gtf","gz"],key="ann_ded_gff")
         src=st.radio("Source",["Sélection","GWAS"],horizontal=True,key="ann_ded_src"); wk=st.slider("Fenêtre kb",1,500,50,key="ann_ded_wk")
