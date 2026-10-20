@@ -5,3 +5,4 @@ plotly>=5.20.0
 scipy>=1.11.0
 scikit-learn>=1.4.0
 requests>=2.31.0
+gseapy
