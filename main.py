@@ -1,4 +1,4 @@
-"""🐄 Bovine Genomics Pipeline v10.0 — Ultimate Edition"""
+"""🐄 Bovine Genomics Pipeline v10.1 — Ultimate Edition (Graph fix)"""
 import gzip, io, os, warnings, zipfile, subprocess, tempfile, shutil
 from collections import Counter
 from io import BytesIO
@@ -17,7 +17,7 @@ import requests
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-st.set_page_config(page_title="🐄 Bovine Pipeline v10.0", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v10.1", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 ARS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
 AUTO = [str(i) for i in range(1,30)]
@@ -26,7 +26,6 @@ AUTO = [str(i) for i in range(1,30)]
 # GROUPES PHÉNOTYPIQUES & ADAPTATIFS (SANS CSV)
 # ============================================================
 GROUPES_DEFAULT = {
-    # 1. Les critères précédents
     "Type de production": {
         "LAIT": ["NAR", "NBD", "PTP", "PRS"],
         "VIANDE": ["LJR", "SHO", "YBS"],
@@ -53,34 +52,22 @@ GROUPES_DEFAULT = {
         "RUSTIQUE_AFRICAIN": ["AND", "EBG", "ELN"],
         "SENSIBLE_EUROPEEN": ["LJR", "NAR", "SHO", "YBS", "NBD"]
     },
-
-    # ================= NOUVELLES PISTES =================
-
-    # Piste 1 : Morphologie (Gènes de croissance)
     "Format corporel (Taille)": {
         "GRAND_FORMAT": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP"],
         "PETIT_FORMAT": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"]
     },
-
-    # Piste 2 : Précocité (Vitesse de développement)
     "Vitesse de croissance": {
         "CROISSANCE_RAPIDE": ["LJR", "SHO", "YBS", "NAR", "NBD"],
         "CROISSANCE_LENTE": ["AND", "ELN", "PTP", "PRS", "NKA", "PSH"]
     },
-
-    # Piste 3 : Qualité de la viande (Muscle vs Gras)
     "Composition de la carcasse": {
         "FORTE_MUSCULATURE": ["LJR", "SHO", "YBS"], 
-        "FORT_PERSILLAGE_GRAS": ["NAR", "PTP", "PRS"] # Les zébus ont souvent une bosse de gras
+        "FORT_PERSILLAGE_GRAS": ["NAR", "PTP", "PRS"]
     },
-
-    # Piste 4 : Couleur de la robe (Thermorégulation)
     "Couleur de la robe": {
         "ROBE_CLAIR": ["SHO", "PTP", "NBD", "PSH"], 
         "ROBE_FONCEE": ["LJR", "NAR", "PRS", "AND", "EBG", "ELN"]
     },
-
-    # Piste 5 : Génomique de la conservation
     "Statut de sélection": {
         "FORTEMENT_SELECTIONNEE": ["LJR", "SHO", "YBS", "NAR", "NBD"],
         "LOCALE_ADAPTEE": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"]
@@ -344,7 +331,8 @@ def apply_qc(gt, ind_df, snp_df, params, rem_out=True):
                 z=(sub-np.nanmean(sub))/np.nanstd(sub); idx=np.where(msk)[0]; kp[idx[np.abs(z)>params["het_sd"]]]=False
         gt=gt[kp]; ind_df=ind_df[kp].reset_index(drop=True); tr["het"]=int(len(h)-len(ind_df))
     return gt,ind_df,snp_df,gt_pre,ind_pre,snp_pre,{"n_ind_init":int(n0),"n_snp_init":int(m0),"n_ind_final":int(gt.shape[0]),"n_snp_final":int(gt.shape[1]),"excluded_ind":int(n0-gt.shape[0]),"excluded_snp":int(m0-gt.shape[1]),"trace":tr}
-    # ============================================================
+
+# ============================================================
 # GÉNÉTIQUE DE BASE
 # ============================================================
 @cache_data
@@ -933,7 +921,8 @@ def build_vcf(gt, ind_df, snp_df, proj="Bovine"):
         r=snp_df.iloc[j]; gts=["./." if np.isnan(gt[i,j]) else "0/0" if gt[i,j]==0 else "0/1" if gt[i,j]==1 else "1/1" for i in range(gt.shape[0])]
         b.append(f"{r['CHR']}\t{int(r['BP'])}\t{r['SNP']}\tA\tG\t.\tPASS\t.\tGT\t"+"\t".join(gts))
     return "\n".join(h+b)+"\n"
-    # ============================================================
+
+# ============================================================
 # VISUALISATIONS
 # ============================================================
 def plot_missing(mi,ms):
@@ -1005,7 +994,7 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v10.0")
+    st.title("🐄 Bovine Genomics Pipeline v10.1")
     st.caption("Race × Race | Groupe × Groupe | Méta-Analyses & Adaptation")
 
     with st.sidebar:
@@ -1303,8 +1292,28 @@ def main():
                         elif src=="Group Pairwise": st.session_state.sel_ann_group = ann
                     if ann.empty: st.warning("Aucun gène")
                     else: st.success(f"✅ {len(ann)} associations")
-                if st.session_state.get("sel_ann") is not None:
-                    ann=st.session_state.sel_ann; st.dataframe(ann,use_container_width=True); st.download_button("⬇ CSV",ann.to_csv(index=False).encode(),"sel_ann_cm.csv","text/csv")
+                
+                # === LE BLOC CORRIGÉ EST ICI ===
+                if st.session_state.get("sel_ann") is not None and len(st.session_state.sel_ann)>0:
+                    ann=st.session_state.sel_ann
+                    st.dataframe(ann,use_container_width=True)
+                    st.download_button("⬇ CSV",ann.to_csv(index=False).encode(),"sel_ann_cm.csv","text/csv")
+                    
+                    sc=ann["SNP"].unique().tolist()
+                    ss=st.selectbox("Visualiser",sc,key="ann_track")
+                    row=ann[ann["SNP"]==ss].iloc[0].to_dict()
+                    si={"SNP":row["SNP"],"CHR":row["CHR"],"BP":row.get("SNP_POS_BP",row.get("SNP_POS",0))}
+                    wk_viz=int(window_cm*10) if metric.startswith("cM") else wk_fallback
+                    f=plot_gene_track(si,gff,wk_viz)
+                    if f: st.plotly_chart(f,use_container_width=True,key="plot_gene_track")
+                    
+                    st.markdown("### 🏆 Gènes les plus proches (top 3 / SNP)")
+                    if "DIST_CM" in ann and ann["DIST_CM"].notna().any(): 
+                        top=ann.sort_values(["SNP","DIST_CM"]).groupby("SNP").head(3)[["SNP","GENE","DIST_CM","DIST_KB"]]
+                    else: 
+                        top=ann.sort_values(["SNP","DIST_KB"]).groupby("SNP").head(3)[["SNP","GENE","DIST_KB"]]
+                    st.dataframe(top,use_container_width=True)
+                # ==============================
             except Exception as e: st.error(f"❌ {e}")
         else: st.info("💡 [Télécharger GFF3 bovin](https://ftp.ensembl.org/pub/current_gff3/bos_taurus/)")
 
