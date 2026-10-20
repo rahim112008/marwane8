@@ -26,6 +26,7 @@ AUTO = [str(i) for i in range(1,30)]
 # GROUPES PHÉNOTYPIQUES & ADAPTATIFS (SANS CSV)
 # ============================================================
 GROUPES_DEFAULT = {
+    # 1. Les critères précédents
     "Type de production": {
         "LAIT": ["NAR", "NBD", "PTP", "PRS"],
         "VIANDE": ["LJR", "SHO", "YBS"],
@@ -51,6 +52,38 @@ GROUPES_DEFAULT = {
     "Rusticité / Trypanotolérance": {
         "RUSTIQUE_AFRICAIN": ["AND", "EBG", "ELN"],
         "SENSIBLE_EUROPEEN": ["LJR", "NAR", "SHO", "YBS", "NBD"]
+    },
+
+    # ================= NOUVELLES PISTES =================
+
+    # Piste 1 : Morphologie (Gènes de croissance)
+    "Format corporel (Taille)": {
+        "GRAND_FORMAT": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP"],
+        "PETIT_FORMAT": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"]
+    },
+
+    # Piste 2 : Précocité (Vitesse de développement)
+    "Vitesse de croissance": {
+        "CROISSANCE_RAPIDE": ["LJR", "SHO", "YBS", "NAR", "NBD"],
+        "CROISSANCE_LENTE": ["AND", "ELN", "PTP", "PRS", "NKA", "PSH"]
+    },
+
+    # Piste 3 : Qualité de la viande (Muscle vs Gras)
+    "Composition de la carcasse": {
+        "FORTE_MUSCULATURE": ["LJR", "SHO", "YBS"], 
+        "FORT_PERSILLAGE_GRAS": ["NAR", "PTP", "PRS"] # Les zébus ont souvent une bosse de gras
+    },
+
+    # Piste 4 : Couleur de la robe (Thermorégulation)
+    "Couleur de la robe": {
+        "ROBE_CLAIR": ["SHO", "PTP", "NBD", "PSH"], 
+        "ROBE_FONCEE": ["LJR", "NAR", "PRS", "AND", "EBG", "ELN"]
+    },
+
+    # Piste 5 : Génomique de la conservation
+    "Statut de sélection": {
+        "FORTEMENT_SELECTIONNEE": ["LJR", "SHO", "YBS", "NAR", "NBD"],
+        "LOCALE_ADAPTEE": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"]
     }
 }
 
