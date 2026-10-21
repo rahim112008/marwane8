@@ -687,7 +687,6 @@ def combine_pvalues_fisher(res_race, res_group):
 # FONCTIONS MANQUANTES AJOUTÉES ET CORRIGÉES
 # ============================================================
 def run_gwas(gt, pheno, K, covar, is_bin=False):
-    from scipy import stats
     n, m = gt.shape
     valid = ~np.isnan(pheno)
     gt_imp = impute_mean(gt)
@@ -997,7 +996,10 @@ def run_vep_region_api(snp_df, species="bos_taurus"):
                         "IMPACT": "MODIFIER", "AMINO_ACID_CHANGE": "N/A",
                         "SIFT": "N/A", "POLYPHEN": "N/A"
                     })
-            return pd.DataFrame(results)
+            if results:
+                return pd.DataFrame(results)
+            else:
+                return pd.DataFrame()
         else:
             st.error(f"Erreur VEP API : Code {response.status_code}.")
             return pd.DataFrame()
@@ -1381,7 +1383,7 @@ def main():
             else:
                 st.markdown("### ⚖️ Étude croisée Race vs Groupe")
                 res_r = st.session_state.get("pair_res_race"); res_g = st.session_state.get("pair_res_group")
-                if res_r is None or res_g is None: st.warning("⚠️ Lancez une analyse en mode RACE puis en mode GROUPE pour pouvoir les comparer.")
+                if res_r is None or res_r.empty or res_g is None or res_g.empty: st.warning("⚠️ Lancez une analyse en mode RACE puis en mode GROUPE pour pouvoir les comparer.")
                 else:
                     name_r = st.session_state.get("pair_name_race", "Race"); name_g = st.session_state.get("pair_name_group", "Groupe")
                     c1, c2 = st.columns(2); c1.metric(f"🏷️ {name_r}", f"{len(res_r)} SNPs", delta=f"{(res_r['P']<0.05/len(res_r)).sum()} Bonf"); c2.metric(f"📊 {name_g}", f"{len(res_g)} SNPs", delta=f"{(res_g['P']<0.05/len(res_g)).sum()} Bonf")
@@ -1444,8 +1446,8 @@ def main():
         if st.session_state.get("win_fst") is not None: sources.append("FST outliers")
         if st.session_state.get("taj_df") is not None: sources.append("Tajima extrêmes")
         if st.session_state.get("css_df") is not None: sources.append("CSS top")
-        if st.session_state.get("pair_res_race") is not None: sources.append("Race Pairwise")
-        if st.session_state.get("pair_res_group") is not None: sources.append("Group Pairwise")
+        if st.session_state.get("pair_res_race") is not None and not st.session_state.pair_res_race.empty: sources.append("Race Pairwise")
+        if st.session_state.get("pair_res_group") is not None and not st.session_state.pair_res_group.empty: sources.append("Group Pairwise")
         sources.append("Manuel")
         if gff_f is not None:
             try:
@@ -1541,7 +1543,7 @@ def main():
 
     # ═══════════════ Post-GWAS ═══════════════
     with tabs[7]:
-        if st.session_state.gwas_res is not None:
+        if st.session_state.gwas_res is not None and not st.session_state.gwas_res.empty:
             pip=fine_mapping(st.session_state.gwas_res); st.dataframe(pip[["SNP","P","PIP"]].head(10),use_container_width=True); st.plotly_chart(plot_pip(pip),use_container_width=True,key="plot_pip_postgwas")
         else: st.warning("Lancez GWAS d'abord")
 
@@ -1567,7 +1569,7 @@ def main():
             try:
                 gff=parse_gff3(gff_f.read()); st.success(f"✅ {len(gff)} gènes"); snps=None
                 if src=="Sélection" and st.session_state.win_fst is not None: snps=st.session_state.win_fst.head(20).rename(columns={"START":"BP","TOP_SNP":"SNP"})[["SNP","CHR","BP"]]
-                elif src=="GWAS" and st.session_state.gwas_res is not None: snps=st.session_state.gwas_res.sort_values("P").head(20)
+                elif src=="GWAS" and st.session_state.gwas_res is not None and not st.session_state.gwas_res.empty: snps=st.session_state.gwas_res.sort_values("P").head(20)
                 if snps is not None and st.button("🔍 Annoter",key="ann_ded_btn"): st.session_state.ann_df=annotate_genes(snps,gff,wk); st.success("✅")
                 if st.session_state.ann_df is not None: st.dataframe(st.session_state.ann_df,use_container_width=True)
             except Exception as e: st.error(f"❌ {e}")
@@ -1578,10 +1580,10 @@ def main():
         
         st.markdown("### 1️⃣ Sélectionnez les SNPs à analyser")
         sources_snp = []
-        if st.session_state.get("pair_res_group") is not None: sources_snp.append("Top SNPs Groupe")
-        if st.session_state.get("pair_res_race") is not None: sources_snp.append("Top SNPs Race")
-        if st.session_state.get("gwas_res") is not None: sources_snp.append("Top SNPs GWAS Classique")
-        if st.session_state.get("win_fst") is not None: sources_snp.append("Top SNPs FST")
+        if st.session_state.get("pair_res_group") is not None and not st.session_state.pair_res_group.empty: sources_snp.append("Top SNPs Groupe")
+        if st.session_state.get("pair_res_race") is not None and not st.session_state.pair_res_race.empty: sources_snp.append("Top SNPs Race")
+        if st.session_state.get("gwas_res") is not None and not st.session_state.gwas_res.empty: sources_snp.append("Top SNPs GWAS Classique")
+        if st.session_state.get("win_fst") is not None and not st.session_state.win_fst.empty: sources_snp.append("Top SNPs FST")
         sources_snp.append("Saisie manuelle (CHR:BP)")
         
         src_snp = st.selectbox("Source des SNPs", sources_snp, key="vep_src")
@@ -1628,10 +1630,10 @@ def main():
         st.caption("Récupère la description officielle et le résumé fonctionnel de chaque gène via l'API NCBI.")
         
         genes_to_fetch = []
-        if st.session_state.get("vep_res") is not None:
+        if st.session_state.get("vep_res") is not None and not st.session_state.vep_res.empty and "GENE" in st.session_state.vep_res.columns:
             genes_to_fetch = st.session_state.vep_res["GENE"].dropna().unique().tolist()
             genes_to_fetch = [g for g in genes_to_fetch if g not in ("N/A", "Intergenic/Non-codant")]
-        elif st.session_state.get("sel_ann") is not None:
+        elif st.session_state.get("sel_ann") is not None and not st.session_state.sel_ann.empty and "GENE" in st.session_state.sel_ann.columns:
             genes_to_fetch = st.session_state.sel_ann["GENE"].dropna().unique().tolist()
             
         if not genes_to_fetch:
@@ -1650,14 +1652,17 @@ def main():
 
         st.markdown("### 4️⃣ Validation des variants (NCBI dbSNP)")
         if st.button("🔎 Vérifier les rsID sur dbSNP", key="run_dbsnp_btn"):
-            rs_snps = [s for s in df_to_vep["SNP"].astype(str).tolist() if str(s).startswith("rs")]
-            if not rs_snps:
-                st.warning("Aucun rsID trouvé dans la liste (les SNPs sont des AX- ou des coordonnées).")
+            if df_to_vep is None or df_to_vep.empty:
+                st.warning("Aucun SNP sélectionné.")
             else:
-                with st.spinner("Interrogation de dbSNP..."):
-                    dbsnp_res = fetch_ncbi_dbsnp_info(rs_snps[:20])
-                    st.session_state.ncbi_snp_res = dbsnp_res
-                if not dbsnp_res.empty: st.success("✅ Validation dbSNP terminée.")
+                rs_snps = [s for s in df_to_vep["SNP"].astype(str).tolist() if str(s).startswith("rs")]
+                if not rs_snps:
+                    st.warning("Aucun rsID trouvé dans la liste (les SNPs sont des AX- ou des coordonnées).")
+                else:
+                    with st.spinner("Interrogation de dbSNP..."):
+                        dbsnp_res = fetch_ncbi_dbsnp_info(rs_snps[:20])
+                        st.session_state.ncbi_snp_res = dbsnp_res
+                    if not dbsnp_res.empty: st.success("✅ Validation dbSNP terminée.")
         
         if st.session_state.get("ncbi_snp_res") is not None and not st.session_state.ncbi_snp_res.empty:
             st.dataframe(st.session_state.ncbi_snp_res, use_container_width=True)
@@ -1704,10 +1709,10 @@ def main():
 
         st.divider(); st.markdown("## 2️⃣ Méta-analyse Fisher")
         res_r = st.session_state.get("pair_res_race"); res_g = st.session_state.get("pair_res_group")
-        if res_r is None or res_g is None: st.warning("⚠️ Lancez une analyse Race × Race puis Groupe × Groupe.")
+        if res_r is None or res_r.empty or res_g is None or res_g.empty: st.warning("⚠️ Lancez une analyse Race × Race puis Groupe × Groupe.")
         else:
             fish = combine_pvalues_fisher(res_r, res_g)
-            if fish is None: st.warning("Aucun SNP commun.")
+            if fish is None or fish.empty: st.warning("Aucun SNP commun.")
             else:
                 st.success(f"✅ {len(fish)} SNPs communs combinés"); st.dataframe(fish.head(30), use_container_width=True)
                 st.plotly_chart(px.scatter(fish, x="P_race", y="P_group", hover_data=["SNP"], title="Fisher : P_race vs P_group"), use_container_width=True, key="fisher_scatter")
@@ -1717,7 +1722,7 @@ def main():
         sources_genes = []
         if res_r is not None and not res_r.empty: sources_genes.append("SNPs Race (top 50)")
         if res_g is not None and not res_g.empty: sources_genes.append("SNPs Groupe (top 50)")
-        if st.session_state.get("sel_ann") is not None: sources_genes.append("Gènes annotés (sel_ann)")
+        if st.session_state.get("sel_ann") is not None and not st.session_state.sel_ann.empty: sources_genes.append("Gènes annotés (sel_ann)")
         sources_genes.append("Liste manuelle")
         if sources_genes:
             c1, c2 = st.columns(2); src_g = c1.selectbox("Source des gènes", sources_genes, key="enr_src"); outdir = c2.text_input("Dossier sortie", "", key="enr_outdir")
@@ -1729,7 +1734,7 @@ def main():
             elif src_g.startswith("SNPs Groupe"): genes_to_enrich = res_g["SNP"].head(50).tolist()
             elif src_g == "Gènes annotés (sel_ann)":
                 ann = st.session_state.get("sel_ann")
-                if ann is not None and "GENE" in ann.columns: genes_to_enrich = ann["GENE"].dropna().unique().tolist()
+                if ann is not None and not ann.empty and "GENE" in ann.columns: genes_to_enrich = ann["GENE"].dropna().unique().tolist()
             else:
                 txt = st.text_area("Liste de gènes (1/ligne)", key="enr_manual")
                 if txt.strip(): genes_to_enrich = [g.strip() for g in txt.splitlines() if g.strip()]
@@ -1744,7 +1749,7 @@ def main():
 
         st.divider(); st.markdown("## 4️⃣ Réseau STRING")
         genes_string = []
-        if st.session_state.get("sel_ann") is not None:
+        if st.session_state.get("sel_ann") is not None and not st.session_state.sel_ann.empty:
             ann = st.session_state.sel_ann
             if "GENE" in ann.columns: genes_string = ann["GENE"].dropna().unique().tolist()
         st.info(f"Gènes disponibles : {len(genes_string)}")
