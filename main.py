@@ -1,4 +1,4 @@
-"""🐄 Bovine Genomics Pipeline v11.2 — Ultimate Edition (Bugfix & Scientific Update)"""
+"""🐄 Bovine Genomics Pipeline v11.3 — Ultimate Edition (Bugfix & Scientific Update)"""
 import gzip, io, os, warnings, zipfile, subprocess, tempfile, shutil, json, time
 from collections import Counter
 from io import BytesIO
@@ -18,7 +18,7 @@ import requests
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-st.set_page_config(page_title="🐄 Bovine Pipeline v11.2", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v11.3", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 ARS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
 AUTO = [str(i) for i in range(1,30)]
@@ -969,15 +969,25 @@ def run_vep_region_api(snp_df, species="bos_taurus"):
             for i, item in enumerate(response.json()):
                 region_id = item.get("input", "N/A")
                 snp_name = snp_names[i] if i < len(snp_names) else region_id
+                
+                # --- NOUVEAU : Récupération du rsID depuis la base Ensembl ---
+                rsid = "N/A"
+                if "colocated_variants" in item and item["colocated_variants"]:
+                    for cv in item["colocated_variants"]:
+                        if "id" in cv and str(cv["id"]).startswith("rs"):
+                            rsid = cv["id"]
+                            break
+                # -----------------------------------------------------------
+
                 if "transcript_consequences" in item and item["transcript_consequences"]:
                     cons = sorted(item["transcript_consequences"], key=lambda x: x.get("impact", ""), reverse=True)[0]
                     results.append({
-                        "SNP": snp_name, "REGION": region_id, "GENE": cons.get("gene_symbol", "N/A"),
+                        "SNP": snp_name, "RSID": rsid, "REGION": region_id, "GENE": cons.get("gene_symbol", "N/A"),
                         "CONSEQUENCE": ", ".join(cons.get("consequence_terms", ["N/A"])), "IMPACT": cons.get("impact", "N/A"),
                         "AMINO_ACID_CHANGE": cons.get("amino_acids", "N/A"), "SIFT": cons.get("sift_prediction", "N/A"), "POLYPHEN": cons.get("polyphen_prediction", "N/A")
                     })
                 else:
-                    results.append({"SNP": snp_name, "REGION": region_id, "GENE": "Intergenic/Non-codant", "CONSEQUENCE": "N/A", "IMPACT": "MODIFIER", "AMINO_ACID_CHANGE": "N/A", "SIFT": "N/A", "POLYPHEN": "N/A"})
+                    results.append({"SNP": snp_name, "RSID": rsid, "REGION": region_id, "GENE": "Intergenic/Non-codant", "CONSEQUENCE": "N/A", "IMPACT": "MODIFIER", "AMINO_ACID_CHANGE": "N/A", "SIFT": "N/A", "POLYPHEN": "N/A"})
             return pd.DataFrame(results) if results else pd.DataFrame()
         else:
             st.error(f"Erreur VEP API : Code {response.status_code}.")
@@ -1149,7 +1159,7 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v11.2")
+    st.title("🐄 Bovine Genomics Pipeline v11.3")
     st.caption("Race × Race | Groupe × Groupe | VEP & NCBI intégrés")
 
     with st.sidebar:
@@ -1590,7 +1600,7 @@ def main():
         if df_to_vep is not None and not df_to_vep.empty:
             st.info(f"📊 {len(df_to_vep)} SNPs prêts pour l'analyse VEP.")
             st.markdown("### 2️⃣ Impact fonctionnel des variants (Ensembl VEP)")
-            st.caption("Détermine si le SNP est dans un exon, un intron, s'il change un acide aminé (faux-sens) ou non (synonyme).")
+            st.caption("Détermine si le SNP est dans un exon, un intron, s'il change un acide aminé (faux-sens) ou non (synonyme). Récupère aussi le rsID si disponible.")
             
             if st.button("🔬 Lancer l'analyse VEP", type="primary", key="run_vep_btn"):
                 with st.spinner("Interrogation de l'API Ensembl VEP..."):
@@ -1600,8 +1610,18 @@ def main():
                         st.success("✅ Analyse VEP terminée.")
             
             if st.session_state.get("vep_res") is not None and not st.session_state.vep_res.empty:
-                st.dataframe(st.session_state.vep_res, use_container_width=True)
-                st.download_button("⬇ Export VEP CSV", st.session_state.vep_res.to_csv(index=False).encode(), "vep_results.csv", "text/csv", key="dl_vep")
+                vep_df = st.session_state.vep_res.copy()
+                
+                # Filtre interactif
+                st.markdown("#### 🎯 Filtrer par impact fonctionnel")
+                impacts = ["Tous"] + list(vep_df["IMPACT"].unique())
+                selected_impact = st.selectbox("Sélectionner l'impact biologique", impacts)
+                
+                if selected_impact != "Tous":
+                    vep_df = vep_df[vep_df["IMPACT"] == selected_impact]
+                
+                st.dataframe(vep_df, use_container_width=True)
+                st.download_button("⬇ Export VEP Filtré (CSV)", vep_df.to_csv(index=False).encode(), "vep_filtre.csv", "text/csv", key="dl_vep_filtered")
 
         st.markdown("### 3️⃣ Fonctions officielles des gènes (NCBI Gene)")
         st.caption("Récupère la description officielle et le résumé fonctionnel de chaque gène via l'API NCBI.")
@@ -1609,12 +1629,20 @@ def main():
         genes_to_fetch = []
         if st.session_state.get("vep_res") is not None and not st.session_state.vep_res.empty and "GENE" in st.session_state.vep_res.columns:
             genes_to_fetch = st.session_state.vep_res["GENE"].dropna().unique().tolist()
-            genes_to_fetch = [g for g in genes_to_fetch if g not in ("N/A", "Intergenic/Non-codant")]
         elif st.session_state.get("sel_ann") is not None and not st.session_state.sel_ann.empty and "GENE" in st.session_state.sel_ann.columns:
             genes_to_fetch = st.session_state.sel_ann["GENE"].dropna().unique().tolist()
             
+        # FIX : On filtre les gènes non reconnus par NCBI (ID Ensembl, microARN, N/A)
+        if genes_to_fetch:
+            genes_to_fetch = [
+                g for g in genes_to_fetch 
+                if not str(g).startswith("ENS") 
+                and not str(g).startswith("bta-mir") 
+                and str(g) not in ("N/A", "Intergenic/Non-codant")
+            ]
+            
         if not genes_to_fetch:
-            st.warning("⚠️ Aucun gène disponible. Lancez d'abord VEP ou l'annotation classique.")
+            st.warning("⚠️ Aucun gène valide disponible pour NCBI. Lancez d'abord VEP ou l'annotation classique.")
         else:
             st.info(f"🧬 {len(genes_to_fetch)} gènes uniques identifiés : {', '.join(genes_to_fetch[:5])}...")
             if st.button("🏛️ Récupérer les infos NCBI", type="primary", key="run_ncbi_btn"):
@@ -1632,12 +1660,19 @@ def main():
             if df_to_vep is None or df_to_vep.empty:
                 st.warning("Aucun SNP sélectionné.")
             else:
-                rs_snps = [s for s in df_to_vep["SNP"].astype(str).tolist() if str(s).startswith("rs")]
-                if not rs_snps:
-                    st.warning("Aucun rsID trouvé dans la liste (les SNPs sont des AX- ou des coordonnées).")
+                # Utilisation des rsIDs trouvés par VEP, sinon fallback sur les noms de SNPs
+                rsids_to_check = []
+                if st.session_state.get("vep_res") is not None and not st.session_state.vep_res.empty:
+                     rsids_to_check = st.session_state.vep_res["RSID"].dropna().unique().tolist()
+                     
+                if not rsids_to_check:
+                    rsids_to_check = [s for s in df_to_vep["SNP"].astype(str).tolist() if str(s).startswith("rs")]
+                    
+                if not rsids_to_check:
+                    st.warning("Aucun rsID trouvé (ni par VEP, ni dans les noms des SNPs).")
                 else:
                     with st.spinner("Interrogation de dbSNP..."):
-                        dbsnp_res = fetch_ncbi_dbsnp_info(rs_snps[:20])
+                        dbsnp_res = fetch_ncbi_dbsnp_info(rsids_to_check[:20])
                         st.session_state.ncbi_snp_res = dbsnp_res
                     if not dbsnp_res.empty: st.success("✅ Validation dbSNP terminée.")
         
