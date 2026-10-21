@@ -1,4 +1,4 @@
-"""🐄 Bovine Genomics Pipeline v11.1 — Ultimate Edition (VEP/NCBI/STRING Fix)"""
+"""🐄 Bovine Genomics Pipeline v11.2 — Ultimate Edition (Bugfix & Scientific Update)"""
 import gzip, io, os, warnings, zipfile, subprocess, tempfile, shutil, json, time
 from collections import Counter
 from io import BytesIO
@@ -18,7 +18,7 @@ import requests
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-st.set_page_config(page_title="🐄 Bovine Pipeline v11.1", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v11.2", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 ARS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
 AUTO = [str(i) for i in range(1,30)]
@@ -219,7 +219,8 @@ def parse_gff3(b):
     for line in _rt(b).splitlines():
         if line.startswith("#") or not line.strip(): continue
         p=line.split("\t")
-        if len(p)>=9 and p[2] in ("gene","mRNA"):
+        # FIX: On ne garde que les "gene" pour éviter de dupliquer avec les "mRNA"
+        if len(p)>=9 and p[2] == "gene":
             a=p[8]; name="Unknown"
             if "Name=" in a: name=a.split("Name=")[1].split(";")[0]
             elif 'gene_name "' in a: name=a.split('gene_name "')[1].split('"')[0]
@@ -684,13 +685,21 @@ def combine_pvalues_fisher(res_race, res_group):
     return m.sort_values("P_combined").reset_index(drop=True)
 
 # ============================================================
-# FONCTIONS MANQUANTES AJOUTÉES ET CORRIGÉES
+# FONCTIONS GWAS, GBLUP, ANNOTATION, EXPORT
 # ============================================================
 def run_gwas(gt, pheno, K, covar, is_bin=False):
     n, m = gt.shape
     valid = ~np.isnan(pheno)
     gt_imp = impute_mean(gt)
     
+    # FIX: Nettoyage des covariates (PCA) pour éviter les NaN
+    if covar is not None and covar.size > 0:
+        covar = covar.copy()
+        for c in range(covar.shape[1]):
+            col_mean = np.nanmean(covar[:, c])
+            if np.isnan(col_mean): col_mean = 0.0
+            covar[np.isnan(covar[:, c]), c] = col_mean
+            
     X_cov = np.ones((n, 1)) if covar is None or covar.size == 0 else np.column_stack([np.ones(n), covar])
     
     p_vals = np.ones(m)
@@ -751,6 +760,8 @@ def annotate_gwas(res, snp_df):
 def lambda_gc(pvals):
     pvals = pvals[~np.isnan(pvals)]
     if len(pvals) == 0: return np.nan
+    # FIX: Clip pour éviter inf si p=0
+    pvals = np.clip(pvals, 1e-300, 1.0)
     chi2 = stats.chi2.ppf(1 - pvals, df=1)
     return np.median(chi2) / stats.chi2.ppf(0.5, df=1)
 
@@ -810,7 +821,7 @@ def build_plink(gt, ind, snp):
 
 def build_vcf(gt, ind, snp):
     lines = ["##fileformat=VCFv4.2", '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">']
-    header = ["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT"] + ind["IID"].tolist()
+    header = ["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT"] + [str(i) for i in ind["IID"].tolist()]
     lines.append("\t".join(header))
     
     for j in range(gt.shape[1]):
@@ -831,35 +842,15 @@ def build_vcf(gt, ind, snp):
 
 def plot_tree(Z, pops, support, title="", mid=None):
     from scipy.cluster.hierarchy import dendrogram
-    
     dendro = dendrogram(Z, labels=pops, no_plot=True)
-    
     fig = go.Figure()
     for i in range(len(dendro['icoord'])):
-        fig.add_trace(go.Scatter(
-            x=dendro['icoord'][i], 
-            y=dendro['dcoord'][i], 
-            mode='lines', 
-            line=dict(color='black', width=1.5), 
-            showlegend=False, hoverinfo='none'
-        ))
-        
+        fig.add_trace(go.Scatter(x=dendro['icoord'][i], y=dendro['dcoord'][i], mode='lines', line=dict(color='black', width=1.5), showlegend=False, hoverinfo='none'))
     x_ticks = [5 + 10 * i for i in range(len(pops))]
-    fig.update_layout(
-        title=title,
-        xaxis=dict(
-            tickmode='array',
-            tickvals=x_ticks,
-            ticktext=dendro['ivl'],
-            tickangle=-45,
-            showgrid=False,
-            zeroline=False
-        ),
-        yaxis=dict(title="Distance", showgrid=True, zeroline=False),
-        height=600
-    )
+    fig.update_layout(title=title, xaxis=dict(tickmode='array', tickvals=x_ticks, ticktext=dendro['ivl'], tickangle=-45, showgrid=False, zeroline=False), yaxis=dict(title="Distance", showgrid=True, zeroline=False), height=600)
     return fig
 
+# FIX: Annotation par Bornes (Boundary logic) - Scientifiquement rigoureuse
 def annotate_genes_cm(to_ann, snp_full, gff, window_cm=10, window_kb_fallback=100):
     if to_ann is None or to_ann.empty or gff is None or gff.empty:
         return pd.DataFrame()
@@ -885,35 +876,40 @@ def annotate_genes_cm(to_ann, snp_full, gff, window_cm=10, window_kb_fallback=10
         snp_name = str(row.get("SNP", "N/A"))
         chrom = str(row["CHR"])
         bp = float(row.get("BP", row.get("START", 0)))
-        
         snp_cm = get_cm(chrom, bp)
         
         chr_genes = gff_copy[gff_copy["CHR"] == chrom]
         if chr_genes.empty: continue
         
         for _, gene in chr_genes.iterrows():
-            gene_mid = (gene["START"] + gene["END"]) / 2.0
-            dist_kb = abs(gene_mid - bp) / 1000.0
-            gene_cm = get_cm(chrom, gene_mid)
+            if gene["START"] <= bp <= gene["END"]:
+                dist_kb = 0.0
+                dist_cm = 0.0
+                gene_cm = snp_cm
+            else:
+                dist_start_kb = abs(bp - gene["START"]) / 1000.0
+                dist_end_kb = abs(bp - gene["END"]) / 1000.0
+                dist_kb = min(dist_start_kb, dist_end_kb)
+                bound_bp = gene["START"] if dist_start_kb < dist_end_kb else gene["END"]
+                bound_cm = get_cm(chrom, bound_bp)
+                if pd.notna(snp_cm) and pd.notna(bound_cm):
+                    dist_cm = abs(bound_cm - snp_cm)
+                else:
+                    dist_cm = np.nan
             
-            if pd.notna(snp_cm) and pd.notna(gene_cm):
-                dist_cm = abs(gene_cm - snp_cm)
+            if pd.notna(snp_cm) and pd.notna(dist_cm):
                 if dist_cm <= window_cm:
                     results.append({
-                        "SNP": snp_name, "CHR": chrom, "SNP_POS_BP": int(bp),
-                        "SNP_POS_CM": round(snp_cm, 2), "GENE": gene["GENE"],
-                        "GENE_START": int(gene["START"]), "GENE_END": int(gene["END"]),
-                        "DIST_CM": round(dist_cm, 4), "DIST_KB": round(dist_kb, 2),
-                        "WINDOW": f"±{window_cm} cM"
+                        "SNP": snp_name, "CHR": chrom, "SNP_POS_BP": int(bp), "SNP_POS_CM": round(snp_cm, 2), 
+                        "GENE": gene["GENE"], "GENE_START": int(gene["START"]), "GENE_END": int(gene["END"]),
+                        "DIST_CM": round(dist_cm, 4), "DIST_KB": round(dist_kb, 2), "WINDOW": f"±{window_cm} cM"
                     })
             else:
                 if dist_kb <= window_kb_fallback:
                     results.append({
-                        "SNP": snp_name, "CHR": chrom, "SNP_POS_BP": int(bp),
-                        "SNP_POS_CM": None, "GENE": gene["GENE"],
-                        "GENE_START": int(gene["START"]), "GENE_END": int(gene["END"]),
-                        "DIST_CM": None, "DIST_KB": round(dist_kb, 2),
-                        "WINDOW": f"±{window_kb_fallback} kb"
+                        "SNP": snp_name, "CHR": chrom, "SNP_POS_BP": int(bp), "SNP_POS_CM": None,
+                        "GENE": gene["GENE"], "GENE_START": int(gene["START"]), "GENE_END": int(gene["END"]),
+                        "DIST_CM": None, "DIST_KB": round(dist_kb, 2), "WINDOW": f"±{window_kb_fallback} kb"
                     })
     return pd.DataFrame(results)
 
@@ -935,71 +931,54 @@ def annotate_genes(to_ann, gff, wk=50):
         if chr_genes.empty: continue
         
         for _, gene in chr_genes.iterrows():
-            if gene["START"] <= bp + w_bp and gene["END"] >= bp - w_bp:
-                gene_mid = (gene["START"] + gene["END"]) / 2.0
-                dist_kb = abs(gene_mid - bp) / 1000.0
+            if gene["START"] <= bp <= gene["END"]:
+                dist_kb = 0.0
+            else:
+                dist_start_kb = abs(bp - gene["START"]) / 1000.0
+                dist_end_kb = abs(bp - gene["END"]) / 1000.0
+                dist_kb = min(dist_start_kb, dist_end_kb)
+                
+            if dist_kb <= wk:
                 results.append({
                     "SNP": snp_name, "CHR": chrom, "SNP_POS": int(bp),
-                    "GENE": gene["GENE"], "GENE_START": int(gene["START"]), 
-                    "GENE_END": int(gene["END"]), "DIST_KB": round(dist_kb, 2)
+                    "GENE": gene["GENE"], "GENE_START": int(gene["START"]), "GENE_END": int(gene["END"]), 
+                    "DIST_KB": round(dist_kb, 2)
                 })
-                
     return pd.DataFrame(results)
 
 # ============================================================
-# NOUVEAU : VEP & NCBI API
+# VEP & NCBI API
 # ============================================================
 def run_vep_region_api(snp_df, species="bos_taurus"):
     if snp_df is None or snp_df.empty: return pd.DataFrame()
-    
-    regions = []
-    snp_names = []
+    regions, snp_names = [], []
     for _, row in snp_df.iterrows():
-        chrom = str(row["CHR"])
-        bp = int(row["BP"]) if "BP" in row else int(row["START"])
+        chrom, bp = str(row["CHR"]), int(row["BP"]) if "BP" in row else int(row["START"])
         regions.append(f"{chrom}:{bp}-{bp}")
         snp_names.append(row.get("SNP", f"{chrom}:{bp}"))
-        
     if len(regions) > 200:
         st.warning(f"⚠️ Limité aux 200 premiers SNPs (sur {len(regions)}).")
-        regions = regions[:200]
-        snp_names = snp_names[:200]
+        regions, snp_names = regions[:200], snp_names[:200]
         
     url = f"https://rest.ensembl.org/vep/{species}/region"
     headers = {"Content-Type": "text/plain", "Accept": "application/json"}
-    payload = "\n".join(regions)
-    
     try:
-        response = requests.post(url, headers=headers, data=payload, timeout=60)
+        response = requests.post(url, headers=headers, data="\n".join(regions), timeout=60)
         if response.status_code == 200:
-            data = response.json()
             results = []
-            for i, item in enumerate(data):
+            for i, item in enumerate(response.json()):
                 region_id = item.get("input", "N/A")
                 snp_name = snp_names[i] if i < len(snp_names) else region_id
-                
                 if "transcript_consequences" in item and item["transcript_consequences"]:
                     cons = sorted(item["transcript_consequences"], key=lambda x: x.get("impact", ""), reverse=True)[0]
                     results.append({
-                        "SNP": snp_name, "REGION": region_id,
-                        "GENE": cons.get("gene_symbol", "N/A"),
-                        "CONSEQUENCE": ", ".join(cons.get("consequence_terms", ["N/A"])),
-                        "IMPACT": cons.get("impact", "N/A"),
-                        "AMINO_ACID_CHANGE": cons.get("amino_acids", "N/A"),
-                        "SIFT": cons.get("sift_prediction", "N/A"),
-                        "POLYPHEN": cons.get("polyphen_prediction", "N/A")
+                        "SNP": snp_name, "REGION": region_id, "GENE": cons.get("gene_symbol", "N/A"),
+                        "CONSEQUENCE": ", ".join(cons.get("consequence_terms", ["N/A"])), "IMPACT": cons.get("impact", "N/A"),
+                        "AMINO_ACID_CHANGE": cons.get("amino_acids", "N/A"), "SIFT": cons.get("sift_prediction", "N/A"), "POLYPHEN": cons.get("polyphen_prediction", "N/A")
                     })
                 else:
-                    results.append({
-                        "SNP": snp_name, "REGION": region_id,
-                        "GENE": "Intergenic/Non-codant", "CONSEQUENCE": "N/A",
-                        "IMPACT": "MODIFIER", "AMINO_ACID_CHANGE": "N/A",
-                        "SIFT": "N/A", "POLYPHEN": "N/A"
-                    })
-            if results:
-                return pd.DataFrame(results)
-            else:
-                return pd.DataFrame()
+                    results.append({"SNP": snp_name, "REGION": region_id, "GENE": "Intergenic/Non-codant", "CONSEQUENCE": "N/A", "IMPACT": "MODIFIER", "AMINO_ACID_CHANGE": "N/A", "SIFT": "N/A", "POLYPHEN": "N/A"})
+            return pd.DataFrame(results) if results else pd.DataFrame()
         else:
             st.error(f"Erreur VEP API : Code {response.status_code}.")
             return pd.DataFrame()
@@ -1017,9 +996,12 @@ def fetch_ncbi_gene_info(gene_list, taxon="9913"):
             if req.status_code == 200:
                 data = req.json()
                 gene_info = data.get("reports", [{}])[0].get("gene", {})
+                # FIX: gestion du cas où 'chromosomes' est vide
+                chroms = gene_info.get("chromosomes", [])
+                chrom = chroms[0] if chroms else "N/A"
                 results.append({
                     "GENE": gene, "Nom complet": gene_info.get("description", "N/A"),
-                    "Chromosome": gene_info.get("chromosomes", ["N/A"])[0],
+                    "Chromosome": chrom,
                     "Résumé": gene_info.get("summary", "N/A")[:200] + "..." if gene_info.get("summary") else "N/A"
                 })
             else:
@@ -1039,8 +1021,7 @@ def fetch_ncbi_dbsnp_info(rsid_list):
         try:
             req = requests.get(url, params=params, timeout=30)
             if req.status_code == 200:
-                data = req.json()
-                snp_data = data.get("result", {}).get(rsid_clean, {})
+                snp_data = req.json().get("result", {}).get(rsid_clean, {})
                 results.append({
                     "rsID": f"rs{rsid_clean}", "Classe": snp_data.get("variant_class", "N/A"),
                     "Fréquence globale": snp_data.get("global_maf", "N/A"),
@@ -1054,17 +1035,21 @@ def fetch_ncbi_dbsnp_info(rsid_list):
     return pd.DataFrame(results)
 
 def run_enrichment(gene_list, gene_sets=None, organism="bovine", outdir=None):
+    # FIX: gestion de l'import manquant
     try:
         import gseapy as gp
-        genes = [str(g).strip() for g in gene_list if str(g).strip() and str(g) != "nan"]
-        genes = list(set(genes))
+    except ImportError:
+        st.error("❌ Le package `gseapy` n'est pas installé. Veuillez exécuter `pip install gseapy`.")
+        return pd.DataFrame()
+        
+    try:
+        genes = list(set([str(g).strip() for g in gene_list if str(g).strip() and str(g) != "nan"]))
         if len(genes) < 3: return pd.DataFrame()
         if gene_sets is None: gene_sets = ["GO_Biological_Process_2023", "KEGG_2021_Human"]
         enr = gp.enrichr(gene_list=genes, gene_sets=gene_sets, organism=organism, outdir=outdir, cutoff=1.0)
         if enr is None or enr.results is None: return pd.DataFrame()
         df = enr.results.copy()
-        rename = {"Term": "TERM", "Adjusted P-value": "FDR", "P-value": "PVAL", "Overlap": "OVERLAP", "Genes": "GENES", "Combined Score": "SCORE"}
-        for old, new in rename.items():
+        for old, new in {"Term": "TERM", "Adjusted P-value": "FDR", "P-value": "PVAL", "Overlap": "OVERLAP", "Genes": "GENES", "Combined Score": "SCORE"}.items():
             if old in df.columns: df = df.rename(columns={old: new})
         return df.sort_values("FDR").reset_index(drop=True)
     except Exception as e:
@@ -1078,8 +1063,7 @@ def query_string_network(genes, species=9913, required_score=400):
     try:
         r = requests.get(url, timeout=60); r.raise_for_status(); data = r.json()
         if not data: return pd.DataFrame(), pd.DataFrame()
-        df = pd.DataFrame(data)
-        edges = df[["preferredName_A", "preferredName_B", "score"]].copy()
+        edges = pd.DataFrame(data)[["preferredName_A", "preferredName_B", "score"]].copy()
         edges.columns = ["SOURCE", "TARGET", "SCORE"]
         nodes = pd.DataFrame({"ID": sorted(set(edges["SOURCE"]).union(set(edges["TARGET"])))})
         return edges, nodes
@@ -1096,24 +1080,11 @@ def plot_string_network(edges, nodes=None):
     
     fig = go.Figure()
     for _, row in edges.iterrows():
-        x0, y0 = pos[row["SOURCE"]]
-        x1, y1 = pos[row["TARGET"]]
-        width = max(1, float(row["SCORE"]) / 200)
-        fig.add_trace(go.Scatter(x=[x0, x1], y=[y0, y1], mode="lines",
-                                 line=dict(width=width, color="#888"),
-                                 showlegend=False, hoverinfo="skip"))
-            
-    xs = [pos[n][0] for n in unique_nodes]
-    ys = [pos[n][1] for n in unique_nodes]
-    fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers+text",
-                             marker=dict(size=15, color="#3498db", line=dict(width=1, color="white")),
-                             text=unique_nodes, textposition="top center",
-                             hovertemplate="%{text}<extra></extra>", showlegend=False))
-        
-    fig.update_layout(title="Réseau d'interactions protéiques (STRING)",
-                      xaxis=dict(showgrid=False, zeroline=False, visible=False),
-                      yaxis=dict(showgrid=False, zeroline=False, visible=False),
-                      height=600, margin=dict(l=20, r=20, t=60, b=20))
+        x0, y0 = pos[row["SOURCE"]]; x1, y1 = pos[row["TARGET"]]
+        fig.add_trace(go.Scatter(x=[x0, x1], y=[y0, y1], mode="lines", line=dict(width=max(1, float(row["SCORE"]) / 200), color="#888"), showlegend=False, hoverinfo="skip"))
+    xs, ys = [pos[n][0] for n in unique_nodes], [pos[n][1] for n in unique_nodes]
+    fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers+text", marker=dict(size=15, color="#3498db", line=dict(width=1, color="white")), text=unique_nodes, textposition="top center", hovertemplate="%{text}<extra></extra>", showlegend=False))
+    fig.update_layout(title="Réseau d'interactions protéiques (STRING)", xaxis=dict(showgrid=False, zeroline=False, visible=False), yaxis=dict(showgrid=False, zeroline=False, visible=False), height=600, margin=dict(l=20, r=20, t=60, b=20))
     return fig
 
 # ============================================================
@@ -1178,7 +1149,7 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v11.1")
+    st.title("🐄 Bovine Genomics Pipeline v11.2")
     st.caption("Race × Race | Groupe × Groupe | VEP & NCBI intégrés")
 
     with st.sidebar:
@@ -1533,7 +1504,13 @@ def main():
                         try:
                             gg=st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
                             sg=st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
-                            cv=st.session_state.pca_s[:,:5] if st.session_state.pca_s is not None else np.empty((gg.shape[0],0))
+                            
+                            # FIX: Vérification de la dimension de la PCA
+                            if st.session_state.pca_s is not None and len(st.session_state.pca_s) == gg.shape[0]:
+                                cv = st.session_state.pca_s[:,:5]
+                            else:
+                                cv = np.empty((gg.shape[0],0))
+                                
                             with st.spinner("GWAS..."):
                                 r=run_gwas(gg,ps.values,st.session_state.king_K,cv,is_bin=ib); r=annotate_gwas(r,sg)
                                 st.session_state.gwas_res=r; st.session_state.lambda_gc=lambda_gc(r["P"].values) if len(r) else np.nan
