@@ -13,6 +13,7 @@ from scipy.optimize import minimize_scalar
 from scipy.stats import t as t_dist
 from sklearn.decomposition import NMF, PCA
 from sklearn.manifold import MDS as SklearnMDS
+from sklearn.linear_model import Ridge
 import requests
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -683,10 +684,273 @@ def combine_pvalues_fisher(res_race, res_group):
     return m.sort_values("P_combined").reset_index(drop=True)
 
 # ============================================================
+# FONCTIONS MANQUANTES AJOUTÉES ET CORRIGÉES
+# ============================================================
+def run_gwas(gt, pheno, K, covar, is_bin=False):
+    from scipy import stats
+    n, m = gt.shape
+    valid = ~np.isnan(pheno)
+    gt_imp = impute_mean(gt)
+    
+    X_cov = np.ones((n, 1)) if covar is None or covar.size == 0 else np.column_stack([np.ones(n), covar])
+    
+    p_vals = np.ones(m)
+    betas = np.zeros(m)
+    
+    y = pheno[valid]
+    X_c = X_cov[valid]
+    gt_valid = gt_imp[valid, :]
+    
+    for i in range(m):
+        g = gt_valid[:, i]
+        if np.std(g) < 1e-6: continue
+        
+        g = g - np.mean(g)
+        X = np.column_stack([X_c, g])
+        
+        try:
+            if is_bin:
+                beta = np.zeros(X.shape[1])
+                for _ in range(15):
+                    eta = X @ beta
+                    mu = 1 / (1 + np.exp(-np.clip(eta, -500, 500)))
+                    W = np.diag(mu * (1 - mu) + 1e-9)
+                    z = eta + (y - mu) / (mu * (1 - mu) + 1e-9)
+                    beta_new = np.linalg.inv(X.T @ W @ X) @ (X.T @ W @ z)
+                    if np.max(np.abs(beta_new - beta)) < 1e-6:
+                        beta = beta_new
+                        break
+                    beta = beta_new
+                se = np.sqrt(np.diag(np.linalg.inv(X.T @ W @ X)))
+                z_val = beta[-1] / se[-1]
+                p_vals[i] = stats.norm.sf(abs(z_val)) * 2
+                betas[i] = beta[-1]
+            else:
+                XtX_inv = np.linalg.inv(X.T @ X)
+                beta = XtX_inv @ X.T @ y
+                resid = y - X @ beta
+                sigma2 = np.sum(resid**2) / (len(y) - X.shape[1])
+                se = np.sqrt(np.diag(XtX_inv) * sigma2)
+                t_val = beta[-1] / se[-1]
+                p_vals[i] = stats.t.sf(abs(t_val), df=len(y) - X.shape[1]) * 2
+                betas[i] = beta[-1]
+        except Exception:
+            pass
+            
+    return pd.DataFrame({"SNP_IDX": np.arange(m), "P": p_vals, "BETA": betas})
+
+def annotate_gwas(res, snp_df):
+    res = res.copy()
+    n = min(len(res), len(snp_df))
+    res = res.iloc[:n]
+    snp_df = snp_df.iloc[:n]
+    res["SNP"] = snp_df["SNP"].values
+    res["CHR"] = snp_df["CHR"].astype(str).values
+    res["BP"] = snp_df["BP"].values
+    return res
+
+def lambda_gc(pvals):
+    pvals = pvals[~np.isnan(pvals)]
+    if len(pvals) == 0: return np.nan
+    chi2 = stats.chi2.ppf(1 - pvals, df=1)
+    return np.median(chi2) / stats.chi2.ppf(0.5, df=1)
+
+def fine_mapping(gwas_res):
+    df = gwas_res.copy()
+    if df.empty: return df
+    df["PIP"] = np.exp(-df["P"] * 10) 
+    df["PIP"] = df["PIP"] / df["PIP"].sum()
+    return df
+
+def plot_pip(df):
+    fig = px.scatter(df, x="CHR", y="PIP", hover_data=["SNP", "P"], title="PIP (Posterior Inclusion Probability)")
+    return fig
+
+def run_gblup(gt, pheno):
+    n, m = gt.shape
+    valid = ~np.isnan(pheno)
+    gt_imp = impute_mean(gt)
+    
+    Z = gt_imp - gt_imp.mean(0)
+    Z = Z / (Z.std(0) + 1e-9)
+    
+    model = Ridge(alpha=1.0)
+    model.fit(Z[valid], pheno[valid])
+    
+    gebv = model.predict(Z)
+    
+    df = pd.DataFrame({"Observed": pheno, "GEBV": gebv})
+    stats_dict = {"R2": model.score(Z[valid], pheno[valid]), "alpha": model.alpha}
+    return df, stats_dict
+
+def plot_gblup(df):
+    fig = px.scatter(df, x="Observed", y="GEBV", trendline="ols", title="GBLUP: Observed vs GEBV")
+    return fig
+
+def build_plink(gt, ind, snp):
+    ped_lines = []
+    for i in range(len(ind)):
+        row = [ind.iloc[i]["FID"], ind.iloc[i]["IID"], "0", "0", "0", "-9"]
+        for j in range(gt.shape[1]):
+            val = gt[i, j]
+            if np.isnan(val): row.extend(["0", "0"])
+            elif val == 0: row.extend(["A", "A"])
+            elif val == 1: row.extend(["A", "B"])
+            else: row.extend(["B", "B"])
+        ped_lines.append("\t".join(map(str, row)))
+    
+    map_lines = []
+    for j in range(gt.shape[1]):
+        map_lines.append(f"{snp.iloc[j]['CHR']}\t{snp.iloc[j]['SNP']}\t0\t{snp.iloc[j]['BP']}")
+        
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr("data.ped", "\n".join(ped_lines))
+        zip_file.writestr("data.map", "\n".join(map_lines))
+    return zip_buffer.getvalue()
+
+def build_vcf(gt, ind, snp):
+    lines = ["##fileformat=VCFv4.2", '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">']
+    header = ["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT"] + ind["IID"].tolist()
+    lines.append("\t".join(header))
+    
+    for j in range(gt.shape[1]):
+        c = str(snp.iloc[j]["CHR"])
+        p = int(snp.iloc[j]["BP"])
+        sid = str(snp.iloc[j]["SNP"])
+        
+        gts = []
+        for i in range(gt.shape[0]):
+            v = gt[i, j]
+            if np.isnan(v): gts.append("./.")
+            elif v == 0: gts.append("0/0")
+            elif v == 1: gts.append("0/1")
+            else: gts.append("1/1")
+            
+        lines.append("\t".join([c, str(p), sid, "A", "G", ".", "PASS", ".", "GT"] + gts))
+    return "\n".join(lines)
+
+def plot_tree(Z, pops, support, title="", mid=None):
+    from scipy.cluster.hierarchy import dendrogram
+    
+    dendro = dendrogram(Z, labels=pops, no_plot=True)
+    
+    fig = go.Figure()
+    for i in range(len(dendro['icoord'])):
+        fig.add_trace(go.Scatter(
+            x=dendro['icoord'][i], 
+            y=dendro['dcoord'][i], 
+            mode='lines', 
+            line=dict(color='black', width=1.5), 
+            showlegend=False, hoverinfo='none'
+        ))
+        
+    x_ticks = [5 + 10 * i for i in range(len(pops))]
+    fig.update_layout(
+        title=title,
+        xaxis=dict(
+            tickmode='array',
+            tickvals=x_ticks,
+            ticktext=dendro['ivl'],
+            tickangle=-45,
+            showgrid=False,
+            zeroline=False
+        ),
+        yaxis=dict(title="Distance", showgrid=True, zeroline=False),
+        height=600
+    )
+    return fig
+
+def annotate_genes_cm(to_ann, snp_full, gff, window_cm=10, window_kb_fallback=100):
+    if to_ann is None or to_ann.empty or gff is None or gff.empty:
+        return pd.DataFrame()
+    
+    gff_copy = gff.copy()
+    gff_copy["CHR"] = gff_copy["CHR"].astype(str)
+    
+    snp_sorted = {}
+    if snp_full is not None and "CM" in snp_full.columns:
+        for c in snp_full["CHR"].astype(str).unique():
+            sub = snp_full[snp_full["CHR"].astype(str) == c].sort_values("BP")
+            if not sub.empty and not (sub["CM"] == 0).all():
+                snp_sorted[c] = (sub["BP"].values, sub["CM"].values)
+                
+    def get_cm(chrom, bp):
+        if chrom not in snp_sorted: return np.nan
+        bps, cms = snp_sorted[chrom]
+        if len(bps) < 2: return np.nan
+        return float(np.interp(bp, bps, cms))
+
+    results = []
+    for _, row in to_ann.iterrows():
+        snp_name = str(row.get("SNP", "N/A"))
+        chrom = str(row["CHR"])
+        bp = float(row.get("BP", row.get("START", 0)))
+        
+        snp_cm = get_cm(chrom, bp)
+        
+        chr_genes = gff_copy[gff_copy["CHR"] == chrom]
+        if chr_genes.empty: continue
+        
+        for _, gene in chr_genes.iterrows():
+            gene_mid = (gene["START"] + gene["END"]) / 2.0
+            dist_kb = abs(gene_mid - bp) / 1000.0
+            gene_cm = get_cm(chrom, gene_mid)
+            
+            if pd.notna(snp_cm) and pd.notna(gene_cm):
+                dist_cm = abs(gene_cm - snp_cm)
+                if dist_cm <= window_cm:
+                    results.append({
+                        "SNP": snp_name, "CHR": chrom, "SNP_POS_BP": int(bp),
+                        "SNP_POS_CM": round(snp_cm, 2), "GENE": gene["GENE"],
+                        "GENE_START": int(gene["START"]), "GENE_END": int(gene["END"]),
+                        "DIST_CM": round(dist_cm, 4), "DIST_KB": round(dist_kb, 2),
+                        "WINDOW": f"±{window_cm} cM"
+                    })
+            else:
+                if dist_kb <= window_kb_fallback:
+                    results.append({
+                        "SNP": snp_name, "CHR": chrom, "SNP_POS_BP": int(bp),
+                        "SNP_POS_CM": None, "GENE": gene["GENE"],
+                        "GENE_START": int(gene["START"]), "GENE_END": int(gene["END"]),
+                        "DIST_CM": None, "DIST_KB": round(dist_kb, 2),
+                        "WINDOW": f"±{window_kb_fallback} kb"
+                    })
+    return pd.DataFrame(results)
+
+def annotate_genes(to_ann, gff, wk=50):
+    if to_ann is None or to_ann.empty or gff is None or gff.empty:
+        return pd.DataFrame()
+        
+    gff_copy = gff.copy()
+    gff_copy["CHR"] = gff_copy["CHR"].astype(str)
+    w_bp = wk * 1000
+    results = []
+    
+    for _, row in to_ann.iterrows():
+        snp_name = str(row.get("SNP", "N/A"))
+        chrom = str(row["CHR"])
+        bp = float(row.get("BP", row.get("START", 0)))
+        
+        chr_genes = gff_copy[gff_copy["CHR"] == chrom]
+        if chr_genes.empty: continue
+        
+        for _, gene in chr_genes.iterrows():
+            if gene["START"] <= bp + w_bp and gene["END"] >= bp - w_bp:
+                gene_mid = (gene["START"] + gene["END"]) / 2.0
+                dist_kb = abs(gene_mid - bp) / 1000.0
+                results.append({
+                    "SNP": snp_name, "CHR": chrom, "SNP_POS": int(bp),
+                    "GENE": gene["GENE"], "GENE_START": int(gene["START"]), 
+                    "GENE_END": int(gene["END"]), "DIST_KB": round(dist_kb, 2)
+                })
+                
+    return pd.DataFrame(results)
+
+# ============================================================
 # NOUVEAU : VEP & NCBI API
 # ============================================================
 def run_vep_region_api(snp_df, species="bos_taurus"):
-    """Envoie les coordonnées CHR:POS-POS à l'API Ensembl VEP."""
     if snp_df is None or snp_df.empty: return pd.DataFrame()
     
     regions = []
@@ -823,9 +1087,6 @@ def query_string_network(genes, species=9913, required_score=400):
 
 def plot_string_network(edges, nodes=None):
     if edges.empty: return None
-    import plotly.graph_objects as go
-    import numpy as np
-    
     unique_nodes = sorted(list(set(edges["SOURCE"]).union(set(edges["TARGET"]))))
     n = len(unique_nodes)
     angles = np.linspace(0, 2*np.pi, n, endpoint=False)
@@ -907,8 +1168,7 @@ def plot_gene_track(si, gff, wk=50):
 # ============================================================
 # INTERFACE STREAMLIT
 # ============================================================
-_KEYS = ["gt","ind_df","snp_df","gt_filt","ind_filt","snp_filt","gt_pre","ind_pre","snp_pre","gt_pruned","snp_pruned","qc_stats","pca_s","pca_v","mds_c","king_K","fst","fst_M","fst_pops","admix_Q","admix_K","cv_res","ld_df","roh_df","froh","ne_dict","reyn_D","reyn_pops","pheno_df","gwas_res","gwas_pheno","lambda_gc","gebv_df","gblup_stats","ann_df","_plink","_vcf","mapping_df","fst_snp_df","win_fst","taj_df","taj_race","css_df","pair_res","pair_res_race","pair_res_group","pair_name_race","pair_name_group","nj_result","nj_mid","sel_gff","sel_ann","sel_ann_race","sel_ann_group","scan_df",
-         "vep_res", "ncbi_gene_res", "ncbi_snp_res"]
+_KEYS = ["gt","ind_df","snp_df","gt_filt","ind_filt","snp_filt","gt_pre","ind_pre","snp_pre","gt_pruned","snp_pruned","qc_stats","pca_s","pca_v","mds_c","king_K","fst","fst_M","fst_pops","admix_Q","admix_K","cv_res","ld_df","roh_df","froh","ne_dict","reyn_D","reyn_pops","pheno_df","gwas_res","gwas_pheno","lambda_gc","gebv_df","gblup_stats","ann_df","_plink","_vcf","mapping_df","fst_snp_df","win_fst","taj_df","taj_race","css_df","pair_res","pair_res_race","pair_res_group","pair_name_race","pair_name_group","nj_result","nj_mid","sel_gff","sel_ann","sel_ann_race","sel_ann_group","scan_df","vep_res", "ncbi_gene_res", "ncbi_snp_res"]
 
 def init_state():
     for k in _KEYS:
