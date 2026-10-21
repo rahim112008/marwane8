@@ -1,4 +1,4 @@
-"""🐄 Bovine Genomics Pipeline v11.3 — Ultimate Edition (Bugfix & Scientific Update)"""
+"""🐄 Bovine Genomics Pipeline v11.5 — Ultimate Edition (Production Ready)"""
 import gzip, io, os, warnings, zipfile, subprocess, tempfile, shutil, json, time
 from collections import Counter
 from io import BytesIO
@@ -18,7 +18,7 @@ import requests
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-st.set_page_config(page_title="🐄 Bovine Pipeline v11.3", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v11.5", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 ARS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
 AUTO = [str(i) for i in range(1,30)]
@@ -171,25 +171,44 @@ def parse_map(b):
     return pd.DataFrame(rows)
 
 def parse_ped(b, n_map):
-    lines=[l.strip() for l in _rt(b).splitlines() if l.strip()]
-    if not lines: raise ValueError(".ped vide")
-    n_ped=max(0,(len(lines[0].split())-6)//2)
-    if n_ped<7: raise ValueError(f"PED a {n_ped} SNPs")
-    n=min(n_map,n_ped); ec=6+2*n; fids,iids,rows=[],[],[]
-    for line in lines:
-        p=line.split()
-        if len(p)>=ec: fids.append(p[0]); iids.append(p[1]); rows.append(p[6:6+2*n])
-    if not iids: raise ValueError("Aucun individu")
-    ac=[Counter() for _ in range(n)]
-    for r in rows:
-        for j in range(n):
-            if r[2*j]!="0" and r[2*j+1]!="0": ac[j].update([r[2*j],r[2*j+1]])
-    minor=[min(c,key=c.get) if len(c)>=2 else None for c in ac]
-    gt=np.full((len(iids),n),np.nan,dtype=np.float32)
-    for i,r in enumerate(rows):
-        for j in range(n):
-            if minor[j] and r[2*j]!="0" and r[2*j+1]!="0": gt[i,j]=(r[2*j]==minor[j])+(r[2*j+1]==minor[j])
-    return gt, pd.DataFrame({"FID":fids,"IID":iids})
+    try:
+        df = pd.read_csv(io.BytesIO(b), sep=r'\s+', header=None, dtype=str)
+    except Exception as e:
+        raise ValueError(f"Erreur de lecture du fichier PED : {e}")
+        
+    if df.empty: raise ValueError("Fichier PED vide")
+    
+    meta_cols = 6
+    if df.shape[1] <= meta_cols: raise ValueError("Format PED invalide (pas de SNPs)")
+    
+    fids = df.iloc[:, 0].values
+    iids = df.iloc[:, 1].values
+    
+    geno_df = df.iloc[:, meta_cols:]
+    n_snp = min(n_map, geno_df.shape[1] // 2)
+    geno_df = geno_df.iloc[:, :n_snp*2]
+    
+    alleles = geno_df.values.reshape(len(df), n_snp, 2)
+    flat_alleles = alleles.reshape(-1, n_snp)
+    flat_alleles = np.where(flat_alleles == "0", np.nan, flat_alleles)
+    
+    gt = np.zeros((len(df), n_snp), dtype=np.float32)
+    
+    for j in range(n_snp):
+        col = flat_alleles[:, j]
+        unique, counts = np.unique(col[~pd.isna(col)], return_counts=True)
+        if len(unique) == 0:
+            gt[:, j] = np.nan
+            continue
+            
+        major_allele = unique[np.argmax(counts)]
+        col_coded = np.where(pd.isna(col), np.nan, (col != major_allele).astype(float))
+        gt[:, j] = np.nansum(col_coded.reshape(-1, 2), axis=1)
+        
+    missing_mask = np.all(alleles == "0", axis=2)
+    gt[missing_mask] = np.nan
+    
+    return gt, pd.DataFrame({"FID": fids, "IID": iids})
 
 def parse_vcf(b):
     samples,rows=[],[]
@@ -219,7 +238,6 @@ def parse_gff3(b):
     for line in _rt(b).splitlines():
         if line.startswith("#") or not line.strip(): continue
         p=line.split("\t")
-        # FIX: On ne garde que les "gene" pour éviter de dupliquer avec les "mRNA"
         if len(p)>=9 and p[2] == "gene":
             a=p[8]; name="Unknown"
             if "Name=" in a: name=a.split("Name=")[1].split(";")[0]
@@ -692,7 +710,6 @@ def run_gwas(gt, pheno, K, covar, is_bin=False):
     valid = ~np.isnan(pheno)
     gt_imp = impute_mean(gt)
     
-    # FIX: Nettoyage des covariates (PCA) pour éviter les NaN
     if covar is not None and covar.size > 0:
         covar = covar.copy()
         for c in range(covar.shape[1]):
@@ -760,7 +777,6 @@ def annotate_gwas(res, snp_df):
 def lambda_gc(pvals):
     pvals = pvals[~np.isnan(pvals)]
     if len(pvals) == 0: return np.nan
-    # FIX: Clip pour éviter inf si p=0
     pvals = np.clip(pvals, 1e-300, 1.0)
     chi2 = stats.chi2.ppf(1 - pvals, df=1)
     return np.median(chi2) / stats.chi2.ppf(0.5, df=1)
@@ -850,7 +866,6 @@ def plot_tree(Z, pops, support, title="", mid=None):
     fig.update_layout(title=title, xaxis=dict(tickmode='array', tickvals=x_ticks, ticktext=dendro['ivl'], tickangle=-45, showgrid=False, zeroline=False), yaxis=dict(title="Distance", showgrid=True, zeroline=False), height=600)
     return fig
 
-# FIX: Annotation par Bornes (Boundary logic) - Scientifiquement rigoureuse
 def annotate_genes_cm(to_ann, snp_full, gff, window_cm=10, window_kb_fallback=100):
     if to_ann is None or to_ann.empty or gff is None or gff.empty:
         return pd.DataFrame()
@@ -954,7 +969,8 @@ def run_vep_region_api(snp_df, species="bos_taurus"):
     regions, snp_names = [], []
     for _, row in snp_df.iterrows():
         chrom, bp = str(row["CHR"]), int(row["BP"]) if "BP" in row else int(row["START"])
-        regions.append(f"{chrom}:{bp}-{bp}")
+        allele = str(row.get("A1", "A")) if pd.notna(row.get("A1", np.nan)) else "A"
+        regions.append(f"{chrom}:{bp}-{bp}:1/{allele}")
         snp_names.append(row.get("SNP", f"{chrom}:{bp}"))
     if len(regions) > 200:
         st.warning(f"⚠️ Limité aux 200 premiers SNPs (sur {len(regions)}).")
@@ -970,14 +986,12 @@ def run_vep_region_api(snp_df, species="bos_taurus"):
                 region_id = item.get("input", "N/A")
                 snp_name = snp_names[i] if i < len(snp_names) else region_id
                 
-                # --- NOUVEAU : Récupération du rsID depuis la base Ensembl ---
                 rsid = "N/A"
                 if "colocated_variants" in item and item["colocated_variants"]:
                     for cv in item["colocated_variants"]:
                         if "id" in cv and str(cv["id"]).startswith("rs"):
                             rsid = cv["id"]
                             break
-                # -----------------------------------------------------------
 
                 if "transcript_consequences" in item and item["transcript_consequences"]:
                     cons = sorted(item["transcript_consequences"], key=lambda x: x.get("impact", ""), reverse=True)[0]
@@ -990,7 +1004,7 @@ def run_vep_region_api(snp_df, species="bos_taurus"):
                     results.append({"SNP": snp_name, "RSID": rsid, "REGION": region_id, "GENE": "Intergenic/Non-codant", "CONSEQUENCE": "N/A", "IMPACT": "MODIFIER", "AMINO_ACID_CHANGE": "N/A", "SIFT": "N/A", "POLYPHEN": "N/A"})
             return pd.DataFrame(results) if results else pd.DataFrame()
         else:
-            st.error(f"Erreur VEP API : Code {response.status_code}.")
+            st.error(f"Erreur VEP API : Code {response.status_code} - {response.text}")
             return pd.DataFrame()
     except Exception as e:
         st.error(f"Erreur réseau VEP : {e}")
@@ -1006,7 +1020,6 @@ def fetch_ncbi_gene_info(gene_list, taxon="9913"):
             if req.status_code == 200:
                 data = req.json()
                 gene_info = data.get("reports", [{}])[0].get("gene", {})
-                # FIX: gestion du cas où 'chromosomes' est vide
                 chroms = gene_info.get("chromosomes", [])
                 chrom = chroms[0] if chroms else "N/A"
                 results.append({
@@ -1031,7 +1044,8 @@ def fetch_ncbi_dbsnp_info(rsid_list):
         try:
             req = requests.get(url, params=params, timeout=30)
             if req.status_code == 200:
-                snp_data = req.json().get("result", {}).get(rsid_clean, {})
+                data = req.json()
+                snp_data = data.get("result", {}).get(rsid_clean, {})
                 results.append({
                     "rsID": f"rs{rsid_clean}", "Classe": snp_data.get("variant_class", "N/A"),
                     "Fréquence globale": snp_data.get("global_maf", "N/A"),
@@ -1045,7 +1059,6 @@ def fetch_ncbi_dbsnp_info(rsid_list):
     return pd.DataFrame(results)
 
 def run_enrichment(gene_list, gene_sets=None, organism="bovine", outdir=None):
-    # FIX: gestion de l'import manquant
     try:
         import gseapy as gp
     except ImportError:
@@ -1159,7 +1172,7 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v11.3")
+    st.title("🐄 Bovine Genomics Pipeline v11.5")
     st.caption("Race × Race | Groupe × Groupe | VEP & NCBI intégrés")
 
     with st.sidebar:
@@ -1515,7 +1528,6 @@ def main():
                             gg=st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
                             sg=st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
                             
-                            # FIX: Vérification de la dimension de la PCA
                             if st.session_state.pca_s is not None and len(st.session_state.pca_s) == gg.shape[0]:
                                 cv = st.session_state.pca_s[:,:5]
                             else:
@@ -1612,7 +1624,6 @@ def main():
             if st.session_state.get("vep_res") is not None and not st.session_state.vep_res.empty:
                 vep_df = st.session_state.vep_res.copy()
                 
-                # Filtre interactif
                 st.markdown("#### 🎯 Filtrer par impact fonctionnel")
                 impacts = ["Tous"] + list(vep_df["IMPACT"].unique())
                 selected_impact = st.selectbox("Sélectionner l'impact biologique", impacts)
@@ -1632,7 +1643,6 @@ def main():
         elif st.session_state.get("sel_ann") is not None and not st.session_state.sel_ann.empty and "GENE" in st.session_state.sel_ann.columns:
             genes_to_fetch = st.session_state.sel_ann["GENE"].dropna().unique().tolist()
             
-        # FIX : On filtre les gènes non reconnus par NCBI (ID Ensembl, microARN, N/A)
         if genes_to_fetch:
             genes_to_fetch = [
                 g for g in genes_to_fetch 
@@ -1660,7 +1670,6 @@ def main():
             if df_to_vep is None or df_to_vep.empty:
                 st.warning("Aucun SNP sélectionné.")
             else:
-                # Utilisation des rsIDs trouvés par VEP, sinon fallback sur les noms de SNPs
                 rsids_to_check = []
                 if st.session_state.get("vep_res") is not None and not st.session_state.vep_res.empty:
                      rsids_to_check = st.session_state.vep_res["RSID"].dropna().unique().tolist()
