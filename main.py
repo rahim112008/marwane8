@@ -1,4 +1,4 @@
-"""🐄 Bovine Genomics Pipeline v11.5 — Ultimate Edition (Production Ready)"""
+"""🐄 Bovine Genomics Pipeline v11.6 — Ultimate Edition (Production Ready & Memory-Safe)"""
 import gzip, io, os, warnings, zipfile, subprocess, tempfile, shutil, json, time
 from collections import Counter
 from io import BytesIO
@@ -18,7 +18,7 @@ import requests
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-st.set_page_config(page_title="🐄 Bovine Pipeline v11.5", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v11.6", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 ARS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
 AUTO = [str(i) for i in range(1,30)]
@@ -176,7 +176,6 @@ def parse_ped(b, n_map):
     lines = text.splitlines()
     if not lines: raise ValueError("Fichier PED vide")
     
-    # Détection du nombre de SNPs
     first_line = lines[0].split()
     n_ped = max(0, (len(first_line) - 6) // 2)
     if n_ped < 7: raise ValueError(f"Format PED invalide (seulement {n_ped} SNPs)")
@@ -194,17 +193,13 @@ def parse_ped(b, n_map):
             
     if not iids: raise ValueError("Aucun individu valide trouvé dans le PED")
     
-    # Conversion en matrice NumPy de string (économique car 1 seule dimension)
     alleles = np.array(rows, dtype=str).reshape(len(iids), n, 2)
-    
-    # Remplacement des allèles manquants "0" par NaN
     alleles = np.where(alleles == "0", np.nan, alleles)
     
     gt = np.zeros((len(iids), n), dtype=np.float32)
     
-    # Traitement SNP par SNP (rapide et sans surcharge mémoire)
     for j in range(n):
-        col = alleles[:, j, :].ravel() # Aplatir les paires d'allèles pour ce SNP
+        col = alleles[:, j, :].ravel()
         unique, counts = np.unique(col[~pd.isna(col)], return_counts=True)
         if len(unique) == 0:
             gt[:, j] = np.nan
@@ -212,16 +207,15 @@ def parse_ped(b, n_map):
             
         major_allele = unique[np.argmax(counts)]
         
-        # Encodage 0/1/2
         col_2d = alleles[:, j, :]
         coded = np.where(pd.isna(col_2d), np.nan, (col_2d != major_allele).astype(np.float32))
         gt[:, j] = np.nansum(coded, axis=1)
         
-    # Remettre les NaN là où les deux allèles étaient manquants
     missing_mask = np.all(alleles == "0", axis=2)
     gt[missing_mask] = np.nan
     
     return gt, pd.DataFrame({"FID": fids, "IID": iids})
+
 def parse_vcf(b):
     samples,rows=[],[]
     for line in _rt(b).splitlines():
@@ -1184,7 +1178,7 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v11.5")
+    st.title("🐄 Bovine Genomics Pipeline v11.6")
     st.caption("Race × Race | Groupe × Groupe | VEP & NCBI intégrés")
 
     with st.sidebar:
