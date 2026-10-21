@@ -171,45 +171,57 @@ def parse_map(b):
     return pd.DataFrame(rows)
 
 def parse_ped(b, n_map):
-    try:
-        df = pd.read_csv(io.BytesIO(b), sep=r'\s+', header=None, dtype=str)
-    except Exception as e:
-        raise ValueError(f"Erreur de lecture du fichier PED : {e}")
-        
-    if df.empty: raise ValueError("Fichier PED vide")
+    """Parseur PED hybride : lit ligne par ligne (économe en RAM) et vectorise avec NumPy."""
+    text = _rt(b)
+    lines = text.splitlines()
+    if not lines: raise ValueError("Fichier PED vide")
     
-    meta_cols = 6
-    if df.shape[1] <= meta_cols: raise ValueError("Format PED invalide (pas de SNPs)")
+    # Détection du nombre de SNPs
+    first_line = lines[0].split()
+    n_ped = max(0, (len(first_line) - 6) // 2)
+    if n_ped < 7: raise ValueError(f"Format PED invalide (seulement {n_ped} SNPs)")
     
-    fids = df.iloc[:, 0].values
-    iids = df.iloc[:, 1].values
+    n = min(n_map, n_ped)
+    ec = 6 + 2 * n
     
-    geno_df = df.iloc[:, meta_cols:]
-    n_snp = min(n_map, geno_df.shape[1] // 2)
-    geno_df = geno_df.iloc[:, :n_snp*2]
+    fids, iids, rows = [], [], []
+    for line in lines:
+        p = line.split()
+        if len(p) >= ec:
+            fids.append(p[0])
+            iids.append(p[1])
+            rows.append(p[6:6+2*n])
+            
+    if not iids: raise ValueError("Aucun individu valide trouvé dans le PED")
     
-    alleles = geno_df.values.reshape(len(df), n_snp, 2)
-    flat_alleles = alleles.reshape(-1, n_snp)
-    flat_alleles = np.where(flat_alleles == "0", np.nan, flat_alleles)
+    # Conversion en matrice NumPy de string (économique car 1 seule dimension)
+    alleles = np.array(rows, dtype=str).reshape(len(iids), n, 2)
     
-    gt = np.zeros((len(df), n_snp), dtype=np.float32)
+    # Remplacement des allèles manquants "0" par NaN
+    alleles = np.where(alleles == "0", np.nan, alleles)
     
-    for j in range(n_snp):
-        col = flat_alleles[:, j]
+    gt = np.zeros((len(iids), n), dtype=np.float32)
+    
+    # Traitement SNP par SNP (rapide et sans surcharge mémoire)
+    for j in range(n):
+        col = alleles[:, j, :].ravel() # Aplatir les paires d'allèles pour ce SNP
         unique, counts = np.unique(col[~pd.isna(col)], return_counts=True)
         if len(unique) == 0:
             gt[:, j] = np.nan
             continue
             
         major_allele = unique[np.argmax(counts)]
-        col_coded = np.where(pd.isna(col), np.nan, (col != major_allele).astype(float))
-        gt[:, j] = np.nansum(col_coded.reshape(-1, 2), axis=1)
         
+        # Encodage 0/1/2
+        col_2d = alleles[:, j, :]
+        coded = np.where(pd.isna(col_2d), np.nan, (col_2d != major_allele).astype(np.float32))
+        gt[:, j] = np.nansum(coded, axis=1)
+        
+    # Remettre les NaN là où les deux allèles étaient manquants
     missing_mask = np.all(alleles == "0", axis=2)
     gt[missing_mask] = np.nan
     
     return gt, pd.DataFrame({"FID": fids, "IID": iids})
-
 def parse_vcf(b):
     samples,rows=[],[]
     for line in _rt(b).splitlines():
