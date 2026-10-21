@@ -1,4 +1,4 @@
-"""🐄 Bovine Genomics Pipeline v10.1 — Ultimate Edition (Graph fix)"""
+"""🐄 Bovine Genomics Pipeline v11.0 — Ultimate Edition (VEP & NCBI)"""
 import gzip, io, os, warnings, zipfile, subprocess, tempfile, shutil
 from collections import Counter
 from io import BytesIO
@@ -14,10 +14,12 @@ from scipy.stats import t as t_dist
 from sklearn.decomposition import NMF, PCA
 from sklearn.manifold import MDS as SklearnMDS
 import requests
+import time
+import json
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-st.set_page_config(page_title="🐄 Bovine Pipeline v10.1", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v11.0", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 ARS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
 AUTO = [str(i) for i in range(1,30)]
@@ -331,9 +333,8 @@ def apply_qc(gt, ind_df, snp_df, params, rem_out=True):
                 z=(sub-np.nanmean(sub))/np.nanstd(sub); idx=np.where(msk)[0]; kp[idx[np.abs(z)>params["het_sd"]]]=False
         gt=gt[kp]; ind_df=ind_df[kp].reset_index(drop=True); tr["het"]=int(len(h)-len(ind_df))
     return gt,ind_df,snp_df,gt_pre,ind_pre,snp_pre,{"n_ind_init":int(n0),"n_snp_init":int(m0),"n_ind_final":int(gt.shape[0]),"n_snp_final":int(gt.shape[1]),"excluded_ind":int(n0-gt.shape[0]),"excluded_snp":int(m0-gt.shape[1]),"trace":tr}
-
-# ============================================================
-# GÉNÉTIQUE DE BASE
+  # ============================================================
+# GÉNÉTIQUE DE BASE & GWAS
 # ============================================================
 @cache_data
 def fst_snp(gt, labels):
@@ -373,19 +374,6 @@ def admixture_nmf(gt, K=3, seed=42):
     m=NMF(n_components=K,init="nndsvda",random_state=seed,max_iter=500)
     W=m.fit_transform(np.clip(impute_mean(gt),0.0,2.0)); s=W.sum(1,keepdims=True); s[s==0]=1.0
     return W/s, m.components_
-
-@cache_data
-def admixture_cv(gt, Kr=(2,6), n_reps=3, seed=42):
-    rng=np.random.default_rng(seed); X=np.clip(impute_mean(gt),0.0,2.0); n,m=X.shape
-    ho=rng.random((n,m))<0.05; Xt=X.copy(); Xt[ho]=0.0; res={}
-    for K in range(Kr[0],Kr[1]):
-        errs=[]
-        for r in range(n_reps):
-            mo=NMF(n_components=K,init="nndsvda",random_state=seed+r,max_iter=300)
-            W=mo.fit_transform(Xt); H=mo.components_
-            errs.append(np.mean((X[ho]-(W@H)[ho])**2))
-        res[K]={"mean":float(np.mean(errs)),"std":float(np.std(errs))}
-    return res
 
 @cache_data
 def ld_pruning(gt, w=50, step=5, r2=0.2):
@@ -695,6 +683,103 @@ def combine_pvalues_fisher(res_race, res_group):
     m["logP_combined"] = -np.log10(m["P_combined"].clip(1e-300, 1))
     return m.sort_values("P_combined").reset_index(drop=True)
 
+# ============================================================
+# NOUVEAU : VEP & NCBI API
+# ============================================================
+def run_vep_api(snp_list, species="bos_taurus"):
+    """Envoie une liste de SNPs à l'API Ensembl VEP."""
+    if not snp_list: return pd.DataFrame()
+    
+    url = f"https://rest.ensembl.org/vep/{species}/id"
+    headers = {"Content-Type": "text/plain", "Accept": "application/json"}
+    payload = "\n".join(snp_list)
+    
+    try:
+        response = requests.post(url, headers=headers, data=payload, timeout=60)
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            for item in data:
+                snp_id = item.get("id", "N/A")
+                if "transcript_consequences" in item and item["transcript_consequences"]:
+                    # On prend la conséquence la plus impactante
+                    cons = sorted(item["transcript_consequences"], key=lambda x: x.get("impact", ""), reverse=True)[0]
+                    results.append({
+                        "SNP": snp_id,
+                        "GENE": cons.get("gene_symbol", "N/A"),
+                        "CONSEQUENCE": ", ".join(cons.get("consequence_terms", ["N/A"])),
+                        "IMPACT": cons.get("impact", "N/A"),
+                        "AMINO_ACID_CHANGE": cons.get("amino_acids", "N/A"),
+                        "SIFT": cons.get("sift_prediction", "N/A"),
+                        "POLYPHEN": cons.get("polyphen_prediction", "N/A")
+                    })
+                else:
+                    results.append({
+                        "SNP": snp_id, "GENE": "Intergenic/Non-codant",
+                        "CONSEQUENCE": "N/A", "IMPACT": "MODIFIER",
+                        "AMINO_ACID_CHANGE": "N/A", "SIFT": "N/A", "POLYPHEN": "N/A"
+                    })
+            return pd.DataFrame(results)
+        else:
+            st.error(f"Erreur VEP API : Code {response.status_code}. Vérifiez les IDs (ex: rs123).")
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erreur réseau VEP : {e}")
+        return pd.DataFrame()
+
+def fetch_ncbi_gene_info(gene_list, taxon="9913"):
+    """Récupère les infos d'un gène via l'API Datasets du NCBI (taxon 9913 = Bos taurus)."""
+    if not gene_list: return pd.DataFrame()
+    results = []
+    for gene in gene_list:
+        url = f"https://api.ncbi.nlm.nih.gov/datasets/v2alpha/gene/symbol/{gene}/taxon/{taxon}"
+        try:
+            req = requests.get(url, timeout=30)
+            if req.status_code == 200:
+                data = req.json()
+                gene_info = data.get("reports", [{}])[0].get("gene", {})
+                results.append({
+                    "GENE": gene,
+                    "Nom complet": gene_info.get("description", "N/A"),
+                    "Chromosome": gene_info.get("chromosomes", ["N/A"])[0],
+                    "Résumé": gene_info.get("summary", "N/A")[:200] + "..." if gene_info.get("summary") else "N/A"
+                })
+            else:
+                results.append({"GENE": gene, "Nom complet": "Non trouvé", "Chromosome": "N/A", "Résumé": "N/A"})
+        except Exception as e:
+            results.append({"GENE": gene, "Nom complet": "Erreur API", "Chromosome": "N/A", "Résumé": str(e)})
+        time.sleep(0.4) # Respect de la limite de l'API NCBI (3 req/sec)
+    return pd.DataFrame(results)
+
+def fetch_ncbi_dbsnp_info(rsid_list):
+    """Interroge dbSNP via E-utilities pour une liste de rsID."""
+    if not rsid_list: return pd.DataFrame()
+    results = []
+    for rsid in rsid_list:
+        rsid_clean = str(rsid).replace("rs", "")
+        url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+        params = {"db": "snp", "id": rsid_clean, "retmode": "json"}
+        try:
+            req = requests.get(url, params=params, timeout=30)
+            if req.status_code == 200:
+                data = req.json()
+                snp_data = data.get("result", {}).get(rsid_clean, {})
+                results.append({
+                    "rsID": f"rs{rsid_clean}",
+                    "Classe": snp_data.get("variant_class", "N/A"),
+                    "Fréquence globale": snp_data.get("global_maf", "N/A"),
+                    "Gènes associés": ", ".join([g.get("name", "") for g in snp_data.get("genes", [])])
+                })
+            else:
+                results.append({"rsID": rsid, "Classe": "Non trouvé", "Fréquence globale": "N/A", "Gènes associés": "N/A"})
+        except Exception as e:
+            results.append({"rsID": rsid, "Classe": "Erreur API", "Fréquence globale": "N/A", "Gènes associés": str(e)})
+        time.sleep(0.4)
+    return pd.DataFrame(results)
+
+# ============================================================
+# AUTRES FONCTIONS (Annotation, GSEA, STRING)
+# ============================================================
 def run_enrichment(gene_list, gene_sets=None, organism="bovine", outdir=None):
     try:
         import gseapy as gp
@@ -921,8 +1006,7 @@ def build_vcf(gt, ind_df, snp_df, proj="Bovine"):
         r=snp_df.iloc[j]; gts=["./." if np.isnan(gt[i,j]) else "0/0" if gt[i,j]==0 else "0/1" if gt[i,j]==1 else "1/1" for i in range(gt.shape[0])]
         b.append(f"{r['CHR']}\t{int(r['BP'])}\t{r['SNP']}\tA\tG\t.\tPASS\t.\tGT\t"+"\t".join(gts))
     return "\n".join(h+b)+"\n"
-
-# ============================================================
+  # ============================================================
 # VISUALISATIONS
 # ============================================================
 def plot_missing(mi,ms):
@@ -986,7 +1070,8 @@ def plot_gene_track(si, gff, wk=50):
 # ============================================================
 # INTERFACE STREAMLIT
 # ============================================================
-_KEYS = ["gt","ind_df","snp_df","gt_filt","ind_filt","snp_filt","gt_pre","ind_pre","snp_pre","gt_pruned","snp_pruned","qc_stats","pca_s","pca_v","mds_c","king_K","fst","fst_M","fst_pops","admix_Q","admix_K","cv_res","ld_df","roh_df","froh","ne_dict","reyn_D","reyn_pops","pheno_df","gwas_res","gwas_pheno","lambda_gc","gebv_df","gblup_stats","ann_df","_plink","_vcf","mapping_df","fst_snp_df","win_fst","taj_df","taj_race","css_df","pair_res","pair_res_race","pair_res_group","pair_name_race","pair_name_group","nj_result","nj_mid","sel_gff","sel_ann","sel_ann_race","sel_ann_group","scan_df"]
+_KEYS = ["gt","ind_df","snp_df","gt_filt","ind_filt","snp_filt","gt_pre","ind_pre","snp_pre","gt_pruned","snp_pruned","qc_stats","pca_s","pca_v","mds_c","king_K","fst","fst_M","fst_pops","admix_Q","admix_K","cv_res","ld_df","roh_df","froh","ne_dict","reyn_D","reyn_pops","pheno_df","gwas_res","gwas_pheno","lambda_gc","gebv_df","gblup_stats","ann_df","_plink","_vcf","mapping_df","fst_snp_df","win_fst","taj_df","taj_race","css_df","pair_res","pair_res_race","pair_res_group","pair_name_race","pair_name_group","nj_result","nj_mid","sel_gff","sel_ann","sel_ann_race","sel_ann_group","scan_df",
+         "vep_res", "ncbi_gene_res", "ncbi_snp_res"]
 
 def init_state():
     for k in _KEYS:
@@ -994,8 +1079,8 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v10.1")
-    st.caption("Race × Race | Groupe × Groupe | Méta-Analyses & Adaptation")
+    st.title("🐄 Bovine Genomics Pipeline v11.0")
+    st.caption("Race × Race | Groupe × Groupe | VEP & NCBI intégrés")
 
     with st.sidebar:
         st.header("📁 Données")
@@ -1038,7 +1123,7 @@ def main():
 
     if st.session_state.gt is None: st.info("👉 Chargez des données."); return
 
-    tabs = st.tabs(["🧹 QC","✂️ LD","🧬 Structure","🎨 Admixture","📈 Démographie","🔍 Sélection","🧪 GWAS Classique","🎯 Post-GWAS","📈 GBLUP","🧬 Annotation","📤 Export","🔬 Méta-Analyse & Enrichissement"])
+    tabs = st.tabs(["🧹 QC","✂️ LD","🧬 Structure","🎨 Admixture","📈 Démographie","🔍 Sélection","🧪 GWAS Classique","🎯 Post-GWAS","📈 GBLUP","🧬 Annotation", "🧬 Annotation Fonctionnelle (VEP/NCBI)", "📤 Export","🔬 Méta-Analyse & Enrichissement"])
 
     # ═══════════════ QC ═══════════════
     with tabs[0]:
@@ -1115,7 +1200,6 @@ def main():
     # ═══════════════ SÉLECTION ═══════════════
     with tabs[5]:
         st.subheader("🔍 Sélection & structure des populations")
-
         if st.button("▶ FST pairwise + Reynolds",key="fst_btn"):
             try:
                 gu=st.session_state.gt_pruned if st.session_state.gt_pruned is not None else st.session_state.gt_filt
@@ -1293,7 +1377,6 @@ def main():
                     if ann.empty: st.warning("Aucun gène")
                     else: st.success(f"✅ {len(ann)} associations")
                 
-                # === LE BLOC CORRIGÉ EST ICI ===
                 if st.session_state.get("sel_ann") is not None and len(st.session_state.sel_ann)>0:
                     ann=st.session_state.sel_ann
                     st.dataframe(ann,use_container_width=True)
@@ -1313,7 +1396,6 @@ def main():
                     else: 
                         top=ann.sort_values(["SNP","DIST_KB"]).groupby("SNP").head(3)[["SNP","GENE","DIST_KB"]]
                     st.dataframe(top,use_container_width=True)
-                # ==============================
             except Exception as e: st.error(f"❌ {e}")
         else: st.info("💡 [Télécharger GFF3 bovin](https://ftp.ensembl.org/pub/current_gff3/bos_taurus/)")
 
@@ -1393,8 +1475,99 @@ def main():
                 if st.session_state.ann_df is not None: st.dataframe(st.session_state.ann_df,use_container_width=True)
             except Exception as e: st.error(f"❌ {e}")
 
-    # ═══════════════ Export ═══════════════
+    # ═══════════════ NOUVEAU : ANNOTATION FONCTIONNELLE (VEP/NCBI) ═══════════════
     with tabs[10]:
+        st.subheader("🧬 Annotation Fonctionnelle Avancée (VEP & NCBI)")
+        
+        # Étape 1 : Choisir la source des SNPs
+        st.markdown("### 1️⃣ Sélectionnez les SNPs à analyser")
+        sources_snp = []
+        if st.session_state.get("pair_res_group") is not None: sources_snp.append("Top SNPs Groupe")
+        if st.session_state.get("pair_res_race") is not None: sources_snp.append("Top SNPs Race")
+        if st.session_state.get("gwas_res") is not None: sources_snp.append("Top SNPs GWAS Classique")
+        if st.session_state.get("win_fst") is not None: sources_snp.append("Top SNPs FST")
+        sources_snp.append("Saisie manuelle")
+        
+        src_snp = st.selectbox("Source des SNPs", sources_snp, key="vep_src")
+        
+        snps_to_analyze = []
+        if src_snp == "Top SNPs Groupe":
+            snps_to_analyze = st.session_state.pair_res_group["SNP"].head(20).tolist()
+        elif src_snp == "Top SNPs Race":
+            snps_to_analyze = st.session_state.pair_res_race["SNP"].head(20).tolist()
+        elif src_snp == "Top SNPs GWAS Classique":
+            snps_to_analyze = st.session_state.gwas_res.sort_values("P")["SNP"].head(20).tolist()
+        elif src_snp == "Top SNPs FST":
+            snps_to_analyze = st.session_state.win_fst["TOP_SNP"].head(20).tolist()
+        else:
+            txt = st.text_area("Liste de SNPs (1/ligne, ex: rs123 ou AX-...)", key="vep_manual")
+            if txt.strip(): snps_to_analyze = [s.strip() for s in txt.splitlines() if s.strip()]
+
+        if snps_to_analyze:
+            st.info(f"📊 {len(snps_to_analyze)} SNPs sélectionnés pour analyse.")
+            
+            # Étape 2 : Ensembl VEP
+            st.markdown("### 2️⃣ Impact fonctionnel des variants (Ensembl VEP)")
+            st.caption("Détermine si le SNP est dans un exon, un intron, s'il change un acide aminé (faux-sens) ou non (synonyme).")
+            if st.button("🔬 Lancer l'analyse VEP", type="primary", key="run_vep_btn"):
+                with st.spinner("Interrogation de l'API Ensembl VEP..."):
+                    # VEP API ne fonctionne bien qu'avec des rsID ou des formats CHR:POS:REF:ALT
+                    # On filtre les SNPs qui commencent par 'rs'
+                    rs_snps = [s for s in snps_to_analyze if str(s).startswith("rs")]
+                    if not rs_snps:
+                        st.warning("⚠️ L'API VEP nécessite des identifiants 'rs' (ex: rs123). Vos SNPs (ex: AX-...) ne sont peut-être pas reconnus.")
+                    else:
+                        vep_res = run_vep_api(rs_snps)
+                        st.session_state.vep_res = vep_res
+                        if not vep_res.empty: st.success("✅ Analyse VEP terminée.")
+            
+            if st.session_state.get("vep_res") is not None and not st.session_state.vep_res.empty:
+                st.dataframe(st.session_state.vep_res, use_container_width=True)
+                st.download_button("⬇ Export VEP CSV", st.session_state.vep_res.to_csv(index=False).encode(), "vep_results.csv", "text/csv")
+
+            # Étape 3 : NCBI Gene
+            st.markdown("### 3️⃣ Fonctions officielles des gènes (NCBI Gene)")
+            st.caption("Récupère la description officielle et le résumé fonctionnel de chaque gène via l'API NCBI.")
+            
+            # Extraire la liste unique des gènes depuis l'annotation précédente ou VEP
+            genes_to_fetch = []
+            if st.session_state.get("vep_res") is not None:
+                genes_to_fetch = st.session_state.vep_res["GENE"].dropna().unique().tolist()
+            elif st.session_state.get("sel_ann") is not None:
+                genes_to_fetch = st.session_state.sel_ann["GENE"].dropna().unique().tolist()
+                
+            if not genes_to_fetch:
+                st.warning("⚠️ Aucun gène disponible. Lancez d'abord l'annotation (onglet précédent) ou VEP.")
+            else:
+                st.info(f"🧬 {len(genes_to_fetch)} gènes uniques identifiés : {', '.join(genes_to_fetch[:5])}...")
+                if st.button("🏛️ Récupérer les infos NCBI", type="primary", key="run_ncbi_btn"):
+                    with st.spinner("Interrogation de NCBI Datasets..."):
+                        ncbi_res = fetch_ncbi_gene_info(genes_to_fetch[:20]) # Limite à 20 pour éviter le timeout
+                        st.session_state.ncbi_gene_res = ncbi_res
+                        if not ncbi_res.empty: st.success("✅ Informations NCBI récupérées.")
+                
+                if st.session_state.get("ncbi_gene_res") is not None and not st.session_state.ncbi_gene_res.empty:
+                    st.dataframe(st.session_state.ncbi_gene_res, use_container_width=True)
+                    st.download_button("⬇ Export NCBI Gene CSV", st.session_state.ncbi_gene_res.to_csv(index=False).encode(), "ncbi_gene_info.csv", "text/csv")
+
+            # Étape 4 : NCBI dbSNP
+            st.markdown("### 4️⃣ Validation des variants (NCBI dbSNP)")
+            if st.button("🔎 Vérifier les rsID sur dbSNP", key="run_dbsnp_btn"):
+                rs_snps = [s for s in snps_to_analyze if str(s).startswith("rs")]
+                if not rs_snps:
+                    st.warning("Aucun rsID dans la liste.")
+                else:
+                    with st.spinner("Interrogation de dbSNP..."):
+                        dbsnp_res = fetch_ncbi_dbsnp_info(rs_snps[:20])
+                        st.session_state.ncbi_snp_res = dbsnp_res
+                    if not dbsnp_res.empty: st.success("✅ Validation dbSNP terminée.")
+            
+            if st.session_state.get("ncbi_snp_res") is not None and not st.session_state.ncbi_snp_res.empty:
+                st.dataframe(st.session_state.ncbi_snp_res, use_container_width=True)
+                st.download_button("⬇ Export dbSNP CSV", st.session_state.ncbi_snp_res.to_csv(index=False).encode(), "dbsnp_info.csv", "text/csv")
+
+    # ═══════════════ Export ═══════════════
+    with tabs[11]:
         if st.session_state.gt_filt is not None:
             if st.button("📦 PLINK",key="pl_btn"):
                 try:
@@ -1412,7 +1585,7 @@ def main():
             if st.session_state._vcf: st.download_button("⬇ VCF",st.session_state._vcf.encode(),"bovine.vcf","text/plain")
 
     # ═══════════════ MÉTA-ANALYSE & ENRICHISSEMENT ═══════════════
-    with tabs[11]:
+    with tabs[12]:
         st.subheader("🔬 Méta-analyse Race × Groupe & Enrichissement fonctionnel")
 
         st.markdown("## 1️⃣ Test de permutation")
