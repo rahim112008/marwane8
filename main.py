@@ -1,4 +1,4 @@
-"""🐄 Bovine Genomics Pipeline v11.1 — Ultimate Edition (VEP & NCBI)"""
+"""🐄 Bovine Genomics Pipeline v11.3 — Ultimate Edition (VEP, NCBI & 3D)"""
 import gzip, io, os, warnings, zipfile, subprocess, tempfile, shutil
 from collections import Counter
 from io import BytesIO
@@ -17,10 +17,19 @@ from sklearn.manifold import MDS as SklearnMDS
 import requests
 import time
 import json
+import streamlit.components.v1 as components
+
+# Importations pour la 3D
+try:
+    from stmol import showmol
+    import py3Dmol
+    HAS_3DMOL = True
+except ImportError:
+    HAS_3DMOL = False
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-st.set_page_config(page_title="🐄 Bovine Pipeline v11.1", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v11.3", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 ARS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
 AUTO = [str(i) for i in range(1,30)]
@@ -34,46 +43,10 @@ GROUPES_DEFAULT = {
         "VIANDE": ["LJR", "SHO", "YBS"],
         "MIXTE": ["AND", "EBG", "ELN", "NKA", "PSH"]
     },
-    "Teneur en gras du lait": {
-        "LAIT_GRAS": ["NAR", "PTP", "PRS", "NBD"],
-        "LAIT_MAIGRE": ["LJR", "SHO", "YBS"]
-    },
-    "Cornes": {
-        "CORNU": ["AND", "ELN", "PTP", "PRS", "NKA", "PSH"],
-        "POLLED": ["SHO", "YBS", "LJR", "NAR", "NBD"]
-    },
     "Origine géographique": {
         "ZEBU": ["PTP", "PRS"],
         "TAURIN_EUROPEEN": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP", "FGN"],
         "TAURIN_AFRICAIN": ["AND", "EBG", "ELN", "NKA", "PSH"]
-    },
-    "Adaptation climatique": {
-        "TROPICAL": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"],
-        "TEMPERÉ": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP", "FGN"]
-    },
-    "Rusticité / Trypanotolérance": {
-        "RUSTIQUE_AFRICAIN": ["AND", "EBG", "ELN"],
-        "SENSIBLE_EUROPEEN": ["LJR", "NAR", "SHO", "YBS", "NBD"]
-    },
-    "Format corporel (Taille)": {
-        "GRAND_FORMAT": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP"],
-        "PETIT_FORMAT": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"]
-    },
-    "Vitesse de croissance": {
-        "CROISSANCE_RAPIDE": ["LJR", "SHO", "YBS", "NAR", "NBD"],
-        "CROISSANCE_LENTE": ["AND", "ELN", "PTP", "PRS", "NKA", "PSH"]
-    },
-    "Composition de la carcasse": {
-        "FORTE_MUSCULATURE": ["LJR", "SHO", "YBS"], 
-        "FORT_PERSILLAGE_GRAS": ["NAR", "PTP", "PRS"]
-    },
-    "Couleur de la robe": {
-        "ROBE_CLAIR": ["SHO", "PTP", "NBD", "PSH"], 
-        "ROBE_FONCEE": ["LJR", "NAR", "PRS", "AND", "EBG", "ELN"]
-    },
-    "Statut de sélection": {
-        "FORTEMENT_SELECTIONNEE": ["LJR", "SHO", "YBS", "NAR", "NBD"],
-        "LOCALE_ADAPTEE": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"]
     }
 }
 
@@ -702,12 +675,11 @@ def combine_pvalues_fisher(res_race, res_group):
     return m.sort_values("P_combined").reset_index(drop=True)
 
 # ============================================================
-# VEP & NCBI API (CORRIGÉ)
+# VEP, NCBI & STRUCTURE 3D
 # ============================================================
 _SEVERITY = {"HIGH": 4, "MODERATE": 3, "LOW": 2, "MODIFIER": 1}
 
 def run_vep_api(snp_list, species="bos_taurus", batch=200):
-    """Envoie une liste de SNPs (rsID ou coordonnées) à l'API Ensembl VEP."""
     if not snp_list: return pd.DataFrame()
     url = f"https://rest.ensembl.org/vep/{species}/region"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -746,7 +718,6 @@ def run_vep_api(snp_list, species="bos_taurus", batch=200):
     return pd.DataFrame(results)
 
 def fetch_ncbi_gene_info(gene_list, taxon="9913"):
-    """Récupère les infos d'un gène via l'API Datasets du NCBI (taxon 9913 = Bos taurus)."""
     if not gene_list: return pd.DataFrame()
     results = []
     for gene in gene_list:
@@ -770,31 +741,48 @@ def fetch_ncbi_gene_info(gene_list, taxon="9913"):
         time.sleep(0.4)
     return pd.DataFrame(results)
 
-def fetch_ncbi_dbsnp_info(rsid_list):
-    """Interroge dbSNP via E-utilities pour une liste de rsID."""
-    if not rsid_list: return pd.DataFrame()
-    results = []
-    for rsid in rsid_list:
-        rsid_clean = str(rsid).replace("rs", "")
-        url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-        params = {"db": "snp", "id": rsid_clean, "retmode": "json"}
-        try:
-            req = requests.get(url, params=params, timeout=30)
-            if req.status_code == 200:
-                data = req.json()
-                snp_data = data.get("result", {}).get(rsid_clean, {})
-                results.append({
-                    "rsID": f"rs{rsid_clean}",
-                    "Classe": snp_data.get("variant_class", "N/A"),
-                    "Fréquence globale": snp_data.get("global_maf", "N/A"),
-                    "Gènes associés": ", ".join([g.get("name", "") for g in snp_data.get("genes", [])])
-                })
-            else:
-                results.append({"rsID": rsid, "Classe": "Non trouvé", "Fréquence globale": "N/A", "Gènes associés": "N/A"})
-        except Exception as e:
-            results.append({"rsID": rsid, "Classe": "Erreur API", "Fréquence globale": "N/A", "Gènes associés": str(e)})
-        time.sleep(0.4)
-    return pd.DataFrame(results)
+def fetch_uniprot_id(gene_name, taxon="9913"):
+    query = f"gene:{gene_name} AND organism_id:{taxon}"
+    url = f"https://rest.uniprot.org/uniprotkb/search?query={quote(query)}&format=json&size=1"
+    try:
+        req = requests.get(url, timeout=30)
+        if req.status_code == 200:
+            data = req.json()
+            if data.get("results"):
+                return data["results"][0].get("primaryAccession")
+    except Exception:
+        pass
+    return None
+
+def fetch_alphafold_pdb(uniprot_id):
+    url = f"https://alphafold.ebi.ac.uk/api/prediction/{uniprot_id}"
+    try:
+        req = requests.get(url, timeout=30)
+        if req.status_code == 200:
+            records = req.json()
+            for rec in records:
+                if rec.get("uniprotAccession") == uniprot_id:
+                    pdb_url = rec.get("pdbUrl")
+                    if pdb_url:
+                        pdb_req = requests.get(pdb_url, timeout=30)
+                        if pdb_req.status_code == 200:
+                            return pdb_req.text
+    except Exception:
+        pass
+    return None
+
+def render_3d_structure(pdb_data, style="cartoon", color_scheme="spectrum", highlight_res=None):
+    if not HAS_3DMOL:
+        st.error("⚠️ La bibliothèque py3Dmol n'est pas installée. Veuillez ajouter 'py3Dmol' et 'stmol' au fichier requirements.txt.")
+        return
+    view = py3Dmol.view(width=800, height=500)
+    view.addModel(pdb_data, 'pdb')
+    view.setStyle({style: {'color': color_scheme}})
+    if highlight_res and str(highlight_res).strip().isdigit():
+        view.addStyle({'resi': str(highlight_res)}, {'stick': {'colorscheme': 'redCarbon'}})
+    view.setBackgroundColor('white')
+    view.zoomTo()
+    showmol(view, height=500, width=800)
 
 # ============================================================
 # AUTRES FONCTIONS (Annotation, GSEA, STRING)
@@ -835,7 +823,12 @@ def query_string_network(genes, species=9913, required_score=400):
 
 def plot_string_network(edges, nodes):
     if edges is None or edges.empty: return None
-    import networkx as nx
+    try:
+        import networkx as nx
+    except ImportError:
+        st.error("⚠️ Le module `networkx` n'est pas installé sur le serveur. Ajoutez `networkx` à votre fichier `requirements.txt`.")
+        return None
+    
     G = nx.Graph()
     for _, r in edges.iterrows():
         G.add_edge(r["SOURCE"], r["TARGET"], weight=float(r["SCORE"]))
@@ -1135,8 +1128,8 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v11.1")
-    st.caption("Race × Race | Groupe × Groupe | VEP & NCBI intégrés")
+    st.title("🐄 Bovine Genomics Pipeline v11.3")
+    st.caption("Race × Race | Groupe × Groupe | VEP, NCBI & Structure 3D intégrés")
 
     with st.sidebar:
         st.header("📁 Données")
@@ -1179,7 +1172,7 @@ def main():
 
     if st.session_state.gt is None: st.info("👉 Chargez des données."); return
 
-    tabs = st.tabs(["🧹 QC","✂️ LD","🧬 Structure","🎨 Admixture","📈 Démographie","🔍 Sélection","🧪 GWAS Classique","🎯 Post-GWAS","📈 GBLUP","🧬 Annotation", "🧬 Annotation Fonctionnelle (VEP/NCBI)", "📤 Export","🔬 Méta-Analyse & Enrichissement"])
+    tabs = st.tabs(["🧹 QC","✂️ LD","🧬 Structure","🎨 Admixture","📈 Démographie","🔍 Sélection","🧪 GWAS Classique","🎯 Post-GWAS","📈 GBLUP","🧬 Annotation", "🧬 VEP & NCBI", "🧬 Structure 3D (AlphaFold)", "📤 Export","🔬 Méta-Analyse & Enrichissement"])
 
     # ═══════════════ QC ═══════════════
     with tabs[0]:
@@ -1565,7 +1558,6 @@ def main():
             st.markdown("### 2️⃣ Impact fonctionnel des variants (Ensembl VEP)")
             st.caption("Détermine si le SNP est dans un exon, un intron, s'il change un acide aminé (faux-sens) ou non (synonyme).")
             
-            # Conversion automatique des ID Axiom en format SPDI (coordonnées)
             snp_full = st.session_state.snp_pruned if st.session_state.snp_pruned is not None else st.session_state.snp_filt
             vep_input = []
             if snp_full is not None:
@@ -1601,10 +1593,12 @@ def main():
             elif st.session_state.get("sel_ann") is not None:
                 genes_to_fetch = st.session_state.sel_ann["GENE"].dropna().unique().tolist()
                 
+            genes_to_fetch = [g for g in genes_to_fetch if str(g).strip() not in ("N/A", "Intergenic/Non-codant", "Unknown", "nan", "")]
+                
             if not genes_to_fetch:
-                st.warning("⚠️ Aucun gène disponible. Lancez d'abord l'annotation (onglet précédent) ou VEP.")
+                st.warning("⚠️ Aucun gène valide disponible. Lancez d'abord l'annotation ou VEP.")
             else:
-                st.info(f"🧬 {len(genes_to_fetch)} gènes uniques identifiés : {', '.join(genes_to_fetch[:5])}...")
+                st.info(f"🧬 {len(genes_to_fetch)} gènes uniques valides identifiés : {', '.join(genes_to_fetch[:5])}...")
                 if st.button("🏛️ Récupérer les infos NCBI", type="primary", key="run_ncbi_btn"):
                     with st.spinner("Interrogation de NCBI Datasets..."):
                         ncbi_res = fetch_ncbi_gene_info(genes_to_fetch[:20])
@@ -1616,11 +1610,12 @@ def main():
                     st.download_button("⬇ Export NCBI Gene CSV", st.session_state.ncbi_gene_res.to_csv(index=False).encode(), "ncbi_gene_info.csv", "text/csv")
 
             st.markdown("### 4️⃣ Validation des variants (NCBI dbSNP)")
-            if st.button("🔎 Vérifier les rsID sur dbSNP", key="run_dbsnp_btn"):
-                rs_snps = [s for s in snps_to_analyze if str(s).startswith("rs")]
-                if not rs_snps:
-                    st.warning("Aucun rsID dans la liste.")
-                else:
+            rs_snps = [s for s in snps_to_analyze if str(s).lower().startswith("rs")]
+            
+            if not rs_snps:
+                st.info("💡 **Note :** Vos SNPs (ex: AX-...) ne sont pas des identifiants 'rs'. L'API dbSNP n'accepte que les identifiants `rs` pour la validation directe. Les résultats VEP et NCBI Gene ci-dessus fournissent déjà l'annotation fonctionnelle pour vos variants.")
+            else:
+                if st.button("🔎 Vérifier les rsID sur dbSNP", key="run_dbsnp_btn"):
                     with st.spinner("Interrogation de dbSNP..."):
                         dbsnp_res = fetch_ncbi_dbsnp_info(rs_snps[:20])
                         st.session_state.ncbi_snp_res = dbsnp_res
@@ -1630,8 +1625,43 @@ def main():
                 st.dataframe(st.session_state.ncbi_snp_res, use_container_width=True)
                 st.download_button("⬇ Export dbSNP CSV", st.session_state.ncbi_snp_res.to_csv(index=False).encode(), "dbsnp_info.csv", "text/csv")
 
-    # ═══════════════ Export ═══════════════
+    # ═══════════════ VISUALISATION 3D (AlphaFold) ═══════════════
     with tabs[11]:
+        st.subheader("🧬 Visualisation 3D des Protéines (AlphaFold)")
+        st.markdown("Explorez la structure tridimensionnelle des protéines codées par vos gènes candidats.")
+        
+        if st.session_state.get("vep_res") is not None:
+            genes_to_structure = [g for g in st.session_state.vep_res["GENE"].unique() if str(g).strip() not in ("N/A", "Intergenic/Non-codant", "Unknown", "nan", "")]
+        elif st.session_state.get("sel_ann") is not None:
+            genes_to_structure = [g for g in st.session_state.sel_ann["GENE"].unique() if str(g).strip() not in ("N/A", "Intergenic/Non-codant", "Unknown", "nan", "")]
+        else:
+            genes_to_structure = []
+            st.warning("⚠️ Veuillez d'abord lancer l'annotation VEP ou l'annotation des gènes pour obtenir une liste de gènes.")
+            
+        if genes_to_structure:
+            c1, c2, c3 = st.columns(3)
+            target_gene = c1.selectbox("Sélectionnez le gène", genes_to_structure, key="gene_3d")
+            view_style = c2.selectbox("Style de représentation", ["cartoon", "stick", "sphere", "line"], key="style_3d")
+            color_scheme = c3.selectbox("Coloration", ["spectrum", "chainHetatm", "ssPyMol"], key="color_3d")
+            
+            highlight_res = st.text_input("Surligner un acide aminé spécifique (facultatif, ex: 123)", key="hl_res")
+            
+            if st.button("🔬 Charger la structure 3D", type="primary", key="btn_load_3d"):
+                with st.spinner(f"Recherche de la structure pour {target_gene}..."):
+                    uniprot_id = fetch_uniprot_id(target_gene, taxon="9913")
+                    if uniprot_id:
+                        st.success(f"✅ ID UniProt trouvé : {uniprot_id}")
+                        pdb_data = fetch_alphafold_pdb(uniprot_id)
+                        if pdb_data:
+                            st.info("💡 Vous pouvez interagir avec la molécule (cliquer-glisser pour tourner, molette pour zoomer).")
+                            render_3d_structure(pdb_data, style=view_style, color_scheme=color_scheme, highlight_res=highlight_res)
+                        else:
+                            st.error("❌ Structure AlphaFold introuvable pour cette protéine.")
+                    else:
+                        st.error("❌ Gène non trouvé dans UniProt pour ce taxon.")
+
+    # ═══════════════ Export ═══════════════
+    with tabs[12]:
         if st.session_state.gt_filt is not None:
             if st.button("📦 PLINK",key="pl_btn"):
                 try:
@@ -1649,7 +1679,7 @@ def main():
                 except Exception as e: st.error(f"❌ {e}")
 
     # ═══════════════ MÉTA-ANALYSE & ENRICHISSEMENT ═══════════════
-    with tabs[12]:
+    with tabs[13]:
         st.subheader("🔬 Méta-analyse Race × Groupe & Enrichissement fonctionnel")
 
         st.markdown("## 1️⃣ Test de permutation")
