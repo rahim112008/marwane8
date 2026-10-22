@@ -7,5 +7,5 @@ scikit-learn>=1.4.0
 requests>=2.31.0
 gseapy
 networkx
-py3Dmol
-stmol
+py3Dmol==2.0.0.post2
+stmol==0.0.9
