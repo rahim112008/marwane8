@@ -1,4 +1,4 @@
-"""🐄 Bovine Genomics Pipeline v11.3 — Ultimate Edition (VEP, NCBI & 3D)"""
+"""🐄 Bovine Genomics Pipeline v11.4 — Ultimate Edition (VEP, NCBI & 3D)"""
 import gzip, io, os, warnings, zipfile, subprocess, tempfile, shutil
 from collections import Counter
 from io import BytesIO
@@ -19,17 +19,9 @@ import time
 import json
 import streamlit.components.v1 as components
 
-# Importations pour la 3D
-try:
-    from stmol import showmol
-    import py3Dmol
-    HAS_3DMOL = True
-except ImportError:
-    HAS_3DMOL = False
-
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-st.set_page_config(page_title="🐄 Bovine Pipeline v11.3", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="🐄 Bovine Pipeline v11.4", page_icon="🐄", layout="wide", initial_sidebar_state="expanded")
 
 ARS = {"1":158_534_110,"2":136_231_102,"3":121_005_158,"4":120_000_166,"5":120_089_699,"6":117_806_340,"7":110_682_743,"8":113_384_748,"9":105_708_134,"10":103_308_737,"11":107_310_763,"12":91_163_125,"13":84_246_514,"14":84_648_346,"15":85_207_080,"16":81_726_628,"17":75_176_999,"18":66_059_976,"19":64_089_169,"20":72_042_983,"21":71_599_096,"22":61_416_492,"23":52_531_573,"24":62_384_193,"25":42_959_610,"26":51_680_158,"27":46_772_073,"28":46_333_854,"29":51_319_414}
 AUTO = [str(i) for i in range(1,30)]
@@ -38,7 +30,6 @@ AUTO = [str(i) for i in range(1,30)]
 # GROUPES PHÉNOTYPIQUES & ADAPTATIFS (SANS CSV)
 # ============================================================
 GROUPES_DEFAULT = {
-    
     "Niveau de production laitière": {
         "HAUTE_PRODUCTION_LAITIERE": ["NAR", "NBD", "PTP", "PRS"], 
         "FAIBLE_PRODUCTION_LAITIERE": ["LJR", "SHO", "YBS", "AND", "EBG", "ELN"]
@@ -93,7 +84,7 @@ GROUPES_DEFAULT = {
         "ROBE_FONCEE": ["LJR", "NAR", "PRS", "AND", "EBG", "ELN"]
     },
     "Type de bosse (Morphologie)": {
-        "AVEC_BOSSE_ZEBU": ["PTP", "PRS"], # Adaptation à la chaleur
+        "AVEC_BOSSE_ZEBU": ["PTP", "PRS"],
         "SANS_BOSSE_TAURIN": ["LJR", "NAR", "SHO", "AND", "EBG", "ELN"]
     },
     "Sous-espèce bovine": {
@@ -110,6 +101,18 @@ GROUPES_DEFAULT = {
         "LOCALE_ADAPTEE": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"]
     }
 }
+
+def make_group_map(group_dict):
+    mapping = {}
+    for grp, races in group_dict.items():
+        for r in races: mapping[r.upper()] = grp
+    return mapping
+
+def apply_group_mapping(ind_df, group_map, default="AUTRE"):
+    df = ind_df.copy()
+    df["FID"] = df["FID"].astype(str).str.upper()
+    df["FID_GROUPE"] = df["FID"].map(group_map).fillna(default)
+    return df
 
 # ============================================================
 # FONCTIONS CACHE & UTILS
@@ -817,7 +820,6 @@ def fetch_alphafold_pdb(uniprot_id):
     return None
 
 def render_3d_structure(pdb_data, style="cartoon", color_scheme="spectrum", highlight_res=None):
-    # Solution HTML pure : contourne le problème de installation de stmol sous Python 3.13
     style_json = json.dumps({style: {'color': color_scheme}})
     pdb_json = json.dumps(pdb_data)
     
@@ -841,6 +843,7 @@ def render_3d_structure(pdb_data, style="cartoon", color_scheme="spectrum", high
     </script>
     """
     components.html(html_code, height=520)
+
 # ============================================================
 # AUTRES FONCTIONS (Annotation, GSEA, STRING)
 # ============================================================
@@ -1185,7 +1188,7 @@ def init_state():
 
 def main():
     init_state()
-    st.title("🐄 Bovine Genomics Pipeline v11.3")
+    st.title("🐄 Bovine Genomics Pipeline v11.4")
     st.caption("Race × Race | Groupe × Groupe | VEP, NCBI & Structure 3D intégrés")
 
     with st.sidebar:
