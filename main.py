@@ -38,33 +38,92 @@ AUTO = [str(i) for i in range(1,30)]
 # GROUPES PHÉNOTYPIQUES & ADAPTATIFS (SANS CSV)
 # ============================================================
 GROUPES_DEFAULT = {
-    "Type de production": {
+    # ============================================================
+    # 1. THÉMATIQUE : PRODUCTION (Lait & Viande)
+    # ============================================================
+    "Niveau de production laitière": {
+        "HAUTE_PRODUCTION_LAITIERE": ["NAR", "NBD", "PTP", "PRS"], 
+        "FAIBLE_PRODUCTION_LAITIERE": ["LJR", "SHO", "YBS", "AND", "EBG", "ELN"]
+    },
+    "Teneur en gras du lait": {
+        "LAIT_GRAS": ["NAR", "PTP", "PRS", "NBD"],
+        "LAIT_MAIGRE": ["LJR", "SHO", "YBS"]
+    },
+    "Type de production principal": {
         "LAIT": ["NAR", "NBD", "PTP", "PRS"],
         "VIANDE": ["LJR", "SHO", "YBS"],
         "MIXTE": ["AND", "EBG", "ELN", "NKA", "PSH"]
     },
+    "Vitesse de croissance musculaire": {
+        "CROISSANCE_RAPIDE": ["LJR", "SHO", "YBS", "NAR", "NBD"],
+        "CROISSANCE_LENTE": ["AND", "ELN", "PTP", "PRS", "NKA", "PSH"]
+    },
+    "Qualité de la viande (Persillé)": {
+        "FORT_PERSILLE_GRAS": ["NAR", "PTP", "PRS", "LJR"], 
+        "FAIBLE_PERSILLE_MAIGRE": ["AND", "EBG", "ELN", "NKA", "PSH", "SHO"]
+    },
+    "Développement musculaire": {
+        "FORTE_MUSCULATURE": ["LJR", "SHO", "YBS"], 
+        "MUSCULATURE_NORMALE": ["NAR", "PTP", "PRS", "AND", "EBG", "ELN"]
+    },
+
+    # ============================================================
+    # 2. THÉMATIQUE : ADAPTATION & ENVIRONNEMENT
+    # ============================================================
+    "Adaptation climatique": {
+        "TROPICAL_CHAUD": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"],
+        "TEMPERÉ_FROID": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP", "FGN"]
+    },
+    "Type de poil (Régulation thermique)": {
+        "POIL_LISSE_SLICK": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"], 
+        "POIL_LONG_NORMAL": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP", "FGN"]
+    },
+    "Rusticité (Capacité de survie)": {
+        "RUSTIQUE_LOCALE": ["AND", "EBG", "ELN", "NKA", "PSH", "PTP", "PRS"],
+        "SENSIBLE_COMMERCIALE": ["LJR", "NAR", "SHO", "YBS", "NBD"]
+    },
+    "Trypanotolérance (Maladie du sommeil)": {
+        "RESISTANT_TRYPS": ["AND", "EBG", "ELN", "NKA", "PSH"], 
+        "SENSIBLE_TRYPS": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP", "FGN"]
+    },
+
+    # ============================================================
+    # 3. THÉMATIQUE : MORPHOLOGIE & APPARENCE
+    # ============================================================
+    "Présence de cornes": {
+        "CORNU": ["AND", "ELN", "PTP", "PRS", "NKA", "PSH"],
+        "SANS_CORNES_POLLED": ["SHO", "YBS", "LJR", "NAR", "NBD"]
+    },
+    "Format corporel (Taille)": {
+        "GRAND_FORMAT": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP"],
+        "PETIT_FORMAT": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"]
+    },
+    "Couleur de la robe": {
+        "ROBE_CLAIR": ["SHO", "PTP", "NBD", "PSH"], 
+        "ROBE_FONCEE": ["LJR", "NAR", "PRS", "AND", "EBG", "ELN"]
+    },
+    "Type de bosse (Morphologie)": {
+        "AVEC_BOSSE_ZEBU": ["PTP", "PRS"], # Adaptation à la chaleur
+        "SANS_BOSSE_TAURIN": ["LJR", "NAR", "SHO", "AND", "EBG", "ELN"]
+    },
+
+    # ============================================================
+    # 4. THÉMATIQUE : ORIGINE & ÉVOLUTION
+    # ============================================================
+    "Sous-espèce bovine": {
+        "ZEBU_INDICUS": ["PTP", "PRS"],
+        "TAURUS_TAURUS": ["LJR", "SHO", "YBS", "NAR", "NBD", "AND", "EBG", "ELN"]
+    },
     "Origine géographique": {
-        "ZEBU": ["PTP", "PRS"],
-        "TAURIN_EUROPEEN": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP", "FGN"],
-        "TAURIN_AFRICAIN": ["AND", "EBG", "ELN", "NKA", "PSH"]
+        "EUROPE": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP", "FGN"],
+        "AFRIQUE": ["AND", "EBG", "ELN", "NKA", "PSH"],
+        "ASIE": ["PTP", "PRS"]
+    },
+    "Statut de sélection (Degré de domestication)": {
+        "FORTEMENT_SELECTIONNEE": ["LJR", "SHO", "YBS", "NAR", "NBD"],
+        "LOCALE_ADAPTEE": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"]
     }
 }
-
-def make_group_map(group_dict):
-    mapping = {}
-    for grp, races in group_dict.items():
-        for r in races: mapping[r.upper()] = grp
-    return mapping
-
-def apply_group_mapping(ind_df, group_map, default="AUTRE"):
-    df = ind_df.copy()
-    df["FID"] = df["FID"].astype(str).str.upper()
-    df["FID_GROUPE"] = df["FID"].map(group_map).fillna(default)
-    return df
-
-def get_pairs_groups(groups):
-    g = sorted(pd.unique(groups).astype(str))
-    return g, [(g[i], g[j]) for i in range(len(g)) for j in range(i+1, len(g))]
 
 # ============================================================
 # FONCTIONS CACHE & UTILS
