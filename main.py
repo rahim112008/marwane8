@@ -772,18 +772,30 @@ def fetch_alphafold_pdb(uniprot_id):
     return None
 
 def render_3d_structure(pdb_data, style="cartoon", color_scheme="spectrum", highlight_res=None):
-    if not HAS_3DMOL:
-        st.error("⚠️ La bibliothèque py3Dmol n'est pas installée. Veuillez ajouter 'py3Dmol' et 'stmol' au fichier requirements.txt.")
-        return
-    view = py3Dmol.view(width=800, height=500)
-    view.addModel(pdb_data, 'pdb')
-    view.setStyle({style: {'color': color_scheme}})
+    # Solution HTML pure : contourne le problème de installation de stmol sous Python 3.13
+    style_json = json.dumps({style: {'color': color_scheme}})
+    pdb_json = json.dumps(pdb_data)
+    
+    hl_js = ""
     if highlight_res and str(highlight_res).strip().isdigit():
-        view.addStyle({'resi': str(highlight_res)}, {'stick': {'colorscheme': 'redCarbon'}})
-    view.setBackgroundColor('white')
-    view.zoomTo()
-    showmol(view, height=500, width=800)
+        hl_js = f"viewer.addStyle({{resi: '{highlight_res}'}}, {{stick: {{colorscheme: 'redCarbon'}}}});"
 
+    html_code = f"""
+    <div id="viewport" style="width: 100%; height: 500px; position: relative;"></div>
+    <script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+    <script>
+        let element = document.getElementById("viewport");
+        let config = {{ backgroundColor: 'white' }};
+        let viewer = $3Dmol.createViewer(element, config);
+        let pdbData = {pdb_json};
+        viewer.addModel(pdbData, "pdb");
+        viewer.setStyle({{}}, {style_json});
+        {hl_js}
+        viewer.zoomTo();
+        viewer.render();
+    </script>
+    """
+    components.html(html_code, height=520)
 # ============================================================
 # AUTRES FONCTIONS (Annotation, GSEA, STRING)
 # ============================================================
