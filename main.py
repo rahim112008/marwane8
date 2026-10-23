@@ -38,9 +38,7 @@ AUTO = [str(i) for i in range(1,30)]
 # GROUPES PHÉNOTYPIQUES & ADAPTATIFS (SANS CSV)
 # ============================================================
 GROUPES_DEFAULT = {
-    # ============================================================
-    # 1. THÉMATIQUE : PRODUCTION (Lait & Viande)
-    # ============================================================
+    
     "Niveau de production laitière": {
         "HAUTE_PRODUCTION_LAITIERE": ["NAR", "NBD", "PTP", "PRS"], 
         "FAIBLE_PRODUCTION_LAITIERE": ["LJR", "SHO", "YBS", "AND", "EBG", "ELN"]
@@ -66,10 +64,6 @@ GROUPES_DEFAULT = {
         "FORTE_MUSCULATURE": ["LJR", "SHO", "YBS"], 
         "MUSCULATURE_NORMALE": ["NAR", "PTP", "PRS", "AND", "EBG", "ELN"]
     },
-
-    # ============================================================
-    # 2. THÉMATIQUE : ADAPTATION & ENVIRONNEMENT
-    # ============================================================
     "Adaptation climatique": {
         "TROPICAL_CHAUD": ["AND", "EBG", "ELN", "PTP", "PRS", "NKA", "PSH"],
         "TEMPERÉ_FROID": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP", "FGN"]
@@ -86,10 +80,6 @@ GROUPES_DEFAULT = {
         "RESISTANT_TRYPS": ["AND", "EBG", "ELN", "NKA", "PSH"], 
         "SENSIBLE_TRYPS": ["LJR", "SHO", "YBS", "NAR", "NBD", "EZP", "FGN"]
     },
-
-    # ============================================================
-    # 3. THÉMATIQUE : MORPHOLOGIE & APPARENCE
-    # ============================================================
     "Présence de cornes": {
         "CORNU": ["AND", "ELN", "PTP", "PRS", "NKA", "PSH"],
         "SANS_CORNES_POLLED": ["SHO", "YBS", "LJR", "NAR", "NBD"]
@@ -106,10 +96,6 @@ GROUPES_DEFAULT = {
         "AVEC_BOSSE_ZEBU": ["PTP", "PRS"], # Adaptation à la chaleur
         "SANS_BOSSE_TAURIN": ["LJR", "NAR", "SHO", "AND", "EBG", "ELN"]
     },
-
-    # ============================================================
-    # 4. THÉMATIQUE : ORIGINE & ÉVOLUTION
-    # ============================================================
     "Sous-espèce bovine": {
         "ZEBU_INDICUS": ["PTP", "PRS"],
         "TAURUS_TAURUS": ["LJR", "SHO", "YBS", "NAR", "NBD", "AND", "EBG", "ELN"]
